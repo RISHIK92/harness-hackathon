@@ -1,0 +1,10 @@
+.venv/
+.harness/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+coverage.json
+.worktrees/
+*.log
+.env

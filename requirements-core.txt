@@ -1,0 +1,3 @@
+# Core: stdlib only. Pinned deliberately empty — the harness makes HTTP calls
+# with urllib and parses results with the stdlib, so `make setup` cannot fail
+# on a wheel build. See SPEC.md 2.3.
