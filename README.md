@@ -19,6 +19,35 @@ make setup
 make run ISSUE="parse_date crashes when the input has no separator"
 ```
 
+### From a GitHub issue or pull request
+
+Hand it a reference and nothing else. The harness fetches the issue with its
+comments, clones the repository, creates a branch, and works there:
+
+```bash
+make run ISSUE="owner/repo#123"
+make run ISSUE="https://github.com/owner/repo/pull/456"
+```
+
+An issue gets a `harness/issue-123` branch; a pull request is checked out
+through `pull/456/head`, so a fork works the same as a branch.
+
+No `gh` needed -- the GitHub REST API is reached with the standard library,
+the same way the model providers are. `gh` is used when it is already
+installed, because it already holds your auth. For private repositories or
+to lift the 60-request hourly rate limit, set `GITHUB_TOKEN`.
+
+Reporting back is off by default, because it writes to someone else's issue
+tracker:
+
+```bash
+HARNESS_POST=comment make run ISSUE="owner/repo#123"
+```
+
+That posts the run report as a comment, and only when the run produced a
+verified fix. The harness never pushes code: `git push` stays on the deny
+list, so you review the diff and open the PR yourself.
+
 That is the whole interface. `make setup` creates a virtualenv and prints a
 readiness report; `make run` executes the pipeline and prints the fix, the
 verification results and a confidence report.
@@ -70,7 +99,11 @@ Only `AI_API_KEY` is required. Everything else has a sensible default.
 | `HARNESS_MODEL` / `HARNESS_CHEAP_MODEL` | auto | override model selection |
 | `HARNESS_PROVIDER` / `HARNESS_TIER` | auto | force the adapter or the tier profile |
 | `ISSUE` / `ISSUE_FILE` | stdin | the issue text; also accepted as `argv[1]` |
-| `REPO_PATH` | `$PWD` | the repository to fix |
+| `REPO_PATH` | `$PWD` | the repository to fix (ignored when `ISSUE` is a GitHub reference) |
+| `GITHUB_TOKEN` / `GH_TOKEN` | — | private repositories, and 5000 instead of 60 API requests an hour |
+| `HARNESS_POST` | `off` | `comment` posts the run report back to the issue or PR |
+| `HARNESS_WORKSPACE` | `./.harness/workspace` | where cloned repositories land |
+| `HARNESS_CLONE_DEPTH` | 0 (full) | shallow clone depth; full history is needed for FR-16 |
 | `HARNESS_MAX_CYCLES` | 5 | fix-and-verify cycle cap |
 | `HARNESS_TOKEN_BUDGET` | 900000 | global token cap |
 | `HARNESS_TIME_BUDGET` | 1500 | seconds |

@@ -1,6 +1,7 @@
 """Entry point: `make run` -> python -m harness  (FR-1, FR-2, FR-4)."""
 from __future__ import annotations
 
+import os
 import sys
 import traceback
 
@@ -19,11 +20,22 @@ def main(argv: list[str] | None = None) -> int:
         log.raw(f"config error: {exc}")
         return exits.CONFIG_ERROR
 
-    log = Logger(level=cfg.log_level, secrets=[cfg.api_key])
+    log = Logger(level=cfg.log_level,
+                 secrets=[cfg.api_key, os.environ.get("GITHUB_TOKEN", ""),
+                          os.environ.get("GH_TOKEN", "")])
 
     try:
+        from . import github
+        resolved = github.prepare(cfg.github_ref or cfg.issue, cfg, log)
+        if resolved:
+            cfg.issue, cfg.repo_path = resolved
+            cfg.github = github.parse_ref(cfg.github_ref or "")
+            cfg.__post_init__()          # work_dir follows the new repo
         from .orchestrator import Orchestrator
         return Orchestrator(cfg, log).run()
+    except github.GitHubError as exc:
+        log.raw(f"github: {exc}")
+        return exits.CONFIG_ERROR
     except ConfigError as exc:
         log.raw(f"config error: {exc}")
         return exits.CONFIG_ERROR

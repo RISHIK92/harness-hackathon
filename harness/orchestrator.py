@@ -310,6 +310,11 @@ class Orchestrator:
         REPORT.render_stdout(self.log, self.cfg, summary, root_cause, plan,
                              vres, conf, self.workspace, self.budgets)
         self._record_last_run()
+
+        if self.cfg.github:
+            from . import publish
+            publish.publish(self.cfg, self.log, self.cfg.github,
+                            summary.exit_code, summary, text)
         self.log.raw("")
         self.log.raw("=== DIFF ===")
         self.log.raw(self.workspace.diff() or "(no changes)")

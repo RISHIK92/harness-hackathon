@@ -83,6 +83,7 @@ class Config:
     log_level: str = "info"
     dry_run: bool = False
 
+    github_ref: str | None = None
     task_type: str | None = None
     route: str | None = None
     known_good: str | None = None
@@ -91,6 +92,7 @@ class Config:
 
     # Mutable run state (set by phases, not by env).
     conservative: bool = False
+    github: object = None          # the resolved Ref, when one was supplied
     oracle: str | None = None
     effective_tier: str = "T1"
 
@@ -176,6 +178,11 @@ def load(argv: list[str] | None = None) -> Config:
     replay = env("HARNESS_REPLAY")
     issue = "" if replay else read_issue(argv)
 
+    # A GitHub reference is resolved to issue text and a clone before
+    # anything else runs, so every phase downstream sees an ordinary local
+    # repository and ordinary issue text.
+    github_ref = env("GITHUB_ISSUE") or env("GITHUB_PR") or issue
+
     tier = env("HARNESS_TIER")
     if tier and tier.upper() not in TIER_FACTOR:
         raise ConfigError(f"HARNESS_TIER must be T0, T1 or T2 (got {tier!r})")
@@ -183,6 +190,7 @@ def load(argv: list[str] | None = None) -> Config:
     cfg = Config(
         api_key=api_key,
         issue=issue,
+        github_ref=github_ref,
         repo_path=repo_path,
         base_url=env("AI_BASE_URL"),
         provider=env("HARNESS_PROVIDER"),
