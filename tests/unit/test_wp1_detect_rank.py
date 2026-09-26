@@ -19,18 +19,18 @@ from harness.model.rank import (NoChatModel, chat_capable, ctx_of, rank_models,
 
 # -- FR-6 detection --------------------------------------------------------
 @pytest.mark.parametrize("key,expected", [
-    ("sk-ant-api03-AbCdEf1234567890", "anthropic"),
-    ("sk-ant-AbCdEf1234567890", "anthropic"),
-    ("sk-or-v1-0123456789abcdef0123456789", "openrouter"),
-    ("sk-proj-AbCdEfGhIjKlMnOp123456", "openai"),
-    ("sk-svcacct-AbCdEfGhIj123456", "openai"),
-    ("sk-admin-AbCdEfGhIj123456", "openai"),
-    ("gsk_AbCdEfGhIjKlMnOp1234", "groq"),
-    ("xai-AbCdEfGhIjKlMnOp1234", "xai"),
-    ("csk-AbCdEfGhIjKlMnOp1234", "cerebras"),
-    ("AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz0123", "google"),
-    ("tgp_v1_AbCdEfGhIjKlMnOp1234", "together"),
-    ("fw_AbCdEfGhIjKlMnOp1234", "fireworks"),
+    ("sk-ant-api03-FAKEabcdef1234567890", "anthropic"),
+    ("sk-ant-FAKEabcdef1234567890", "anthropic"),
+    ("sk-or-v1-FAKE0123456789abcdef01", "openrouter"),
+    ("sk-proj-FAKEabcdefghijklmnop12", "openai"),
+    ("sk-svcacct-FAKEabcdefghij1234", "openai"),
+    ("sk-admin-FAKEabcdefghij1234", "openai"),
+    ("gsk_FAKEabcdefghijklmnop34", "groq"),
+    ("xai-FAKEabcdefghijklmnop34", "xai"),
+    ("csk-FAKEabcdefghijklmnop12", "cerebras"),
+    ("AIzaSyFAKEabcdefghijklmnopqrstuvwx23", "google"),
+    ("tgp_v1_FAKEabcdefghijklmnop12", "together"),
+    ("fw_FAKEabcdefghijklmnop1234", "fireworks"),
     ("sk-AbCdEfGhIjKlMnOpQrStUv", AMBIGUOUS),
     ("", "openai_compatible"),
     ("no-known-prefix-at-all", "openai_compatible"),
@@ -41,13 +41,13 @@ def test_prefix_detection(key, expected):
 
 def test_openrouter_key_is_not_mistaken_for_openai():
     """The single most common BYOK bug: sk-or-v1- must beat sk-."""
-    assert detect_provider("sk-or-v1-abcdef0123456789") == "openrouter"
-    p = resolve("sk-or-v1-abcdef0123456789")
+    assert detect_provider("sk-or-v1-FAKEabcdef0123456789") == "openrouter"
+    p = resolve("sk-or-v1-FAKEabcdef0123456789")
     assert "openrouter.ai" in p.base_url
 
 
 def test_project_key_is_not_ambiguous():
-    assert detect_provider("sk-proj-abcdef0123456789") == "openai"
+    assert detect_provider("sk-proj-FAKEabcdef0123456789") == "openai"
 
 
 def test_longest_prefix_wins_over_short():
@@ -62,11 +62,11 @@ def test_detection_makes_no_network_call(monkeypatch):
 
     monkeypatch.setattr(socket, "socket", boom)
     monkeypatch.setattr(socket, "create_connection", boom)
-    assert detect_provider("sk-ant-api03-abc123456789") == "anthropic"
+    assert detect_provider("sk-ant-api03-FAKEabc123456789") == "anthropic"
 
 
 def test_ambiguous_ladder_prefers_base_url():
-    p = resolve("sk-abcdefghij1234567", base_url="http://localhost:11434/v1")
+    p = resolve("sk-FAKEabcdefghij1234567", base_url="http://localhost:11434/v1")
     assert p.base_url == "http://localhost:11434/v1"
     assert p.wire == "openai"
 
@@ -78,18 +78,18 @@ def test_ambiguous_ladder_uses_prober_in_fixed_order():
         seen.append(provider.name)
         return provider.name == "deepseek"
 
-    p = resolve("sk-abcdefghij1234567", prober=prober)
+    p = resolve("sk-FAKEabcdefghij1234567", prober=prober)
     assert p.name == "deepseek"
     assert seen == ["openai", "deepseek"]
 
 
 def test_ambiguous_ladder_defaults_to_openai():
-    p = resolve("sk-abcdefghij1234567", prober=lambda _p: False)
+    p = resolve("sk-FAKEabcdefghij1234567", prober=lambda _p: False)
     assert p.name == "openai"
 
 
 def test_forced_provider_overrides_prefix():
-    p = resolve("sk-ant-api03-abc123456789", forced="groq")
+    p = resolve("sk-ant-api03-FAKEabc123456789", forced="groq")
     assert p.name == "groq"
 
 
@@ -97,13 +97,13 @@ def test_base_url_selects_openai_wire():
     """FR-10: AI_BASE_URL means an OpenAI-compatible endpoint, whatever the
     key prefix says. Talking the anthropic wire to an OpenAI gateway silently
     returns empty replies."""
-    p = resolve("sk-ant-api03-abc123456789", base_url="https://proxy.local/v1")
+    p = resolve("sk-ant-api03-FAKEabc123456789", base_url="https://proxy.local/v1")
     assert p.base_url == "https://proxy.local/v1"
     assert p.wire == "openai"
 
 
 def test_harness_provider_overrides_base_url_wire():
-    p = resolve("sk-ant-api03-abc123456789", base_url="https://proxy.local",
+    p = resolve("sk-ant-api03-FAKEabc123456789", base_url="https://proxy.local",
                 forced="anthropic")
     assert p.wire == "anthropic"
     assert p.base_url == "https://proxy.local"

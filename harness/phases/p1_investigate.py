@@ -165,8 +165,8 @@ class Investigation:
             for sym in symbols(self.ctx.repo / path):
                 if sym.start <= line <= sym.end and sym.kind != "class":
                     return sym.qualname
-        except Exception:
-            pass
+        except (OSError, ValueError, SyntaxError):
+            self.ctx.log.debug(f"could not read symbols from {path}")
         return ""
 
     # -- routes ------------------------------------------------------------

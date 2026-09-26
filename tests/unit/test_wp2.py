@@ -64,7 +64,7 @@ def test_timeout_kills_the_command(tmp_path):
 
 
 def test_api_key_never_reaches_a_subprocess(tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_API_KEY", "sk-ant-api03-LEAKME1234567890")
+    monkeypatch.setenv("AI_API_KEY", "sk-ant-api03-FAKELEAKME1234567890")
     monkeypatch.setenv("SOME_TOKEN", "tok-abc")
     r = run("env", tmp_path, timeout=10)
     assert "LEAKME" not in r.stdout

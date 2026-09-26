@@ -47,7 +47,7 @@ def test_discovery_filters_non_chat(monkeypatch, tmp_path):
 
     monkeypatch.setattr(http_mod, "request", fake)
     monkeypatch.setattr(oai, "request", fake)
-    d = disc_mod.discover(PROVIDERS["openai"], "sk-proj-x", use_cache=False)
+    d = disc_mod.discover(PROVIDERS["openai"], "sk-proj-FAKEx", use_cache=False)
     assert d.ok
     assert d.ids == ["gpt-5", "gpt-4o-mini"]
     assert d.raw_count == 4
@@ -59,7 +59,7 @@ def test_discovery_degrades_on_failure(monkeypatch):
         raise ProviderError("HTTP 503: down", status=503)
 
     monkeypatch.setattr(oai, "request", boom)
-    d = disc_mod.discover(PROVIDERS["openai"], "sk-proj-x", use_cache=False)
+    d = disc_mod.discover(PROVIDERS["openai"], "sk-proj-FAKEx", use_cache=False)
     assert not d.ok and d.degraded
     assert "503" in d.error
 
@@ -73,10 +73,10 @@ def test_anthropic_models_endpoint_shape(monkeypatch):
         return {"data": [{"id": "claude-opus-5-5"}, {"id": "claude-haiku-4-5"}]}
 
     monkeypatch.setattr(anth, "request", fake)
-    d = disc_mod.discover(PROVIDERS["anthropic"], "sk-ant-key", use_cache=False)
+    d = disc_mod.discover(PROVIDERS["anthropic"], "sk-ant-FAKEkey", use_cache=False)
     assert d.ids == ["claude-opus-5-5", "claude-haiku-4-5"]
     assert seen["url"].endswith("/v1/models")
-    assert seen["headers"]["x-api-key"] == "sk-ant-key"
+    assert seen["headers"]["x-api-key"] == "sk-ant-FAKEkey"
     assert seen["headers"]["anthropic-version"] == "2023-06-01"
 
 
@@ -94,7 +94,7 @@ def test_openai_adapter_normalizes(monkeypatch):
                       "prompt_tokens_details": {"cached_tokens": 8}}}
 
     monkeypatch.setattr(oai, "request", fake)
-    r = oai.chat("https://api.openai.com/v1", "sk-proj-x", "gpt-5",
+    r = oai.chat("https://api.openai.com/v1", "sk-proj-FAKEx", "gpt-5",
                  [{"role": "user", "content": "hi"}])
     assert r.text == "hello"
     assert r.tool_calls[0].name == "echo"
@@ -152,7 +152,7 @@ def test_gateway_retries_then_succeeds(monkeypatch, tmp_path):
     monkeypatch.setattr(oai, "request", flaky)
     monkeypatch.setattr("time.sleep", lambda *_: None)
     cfg = make_cfg(tmp_path, no_cache=True)
-    gw = Gateway(PROVIDERS["openai"], "sk-proj-x", cfg, silent_log())
+    gw = Gateway(PROVIDERS["openai"], "sk-proj-FAKEx", cfg, silent_log())
     r = gw.call([{"role": "user", "content": "x"}], "gpt-5")
     assert r.text == "done" and calls["n"] == 4
 
@@ -166,7 +166,7 @@ def test_gateway_does_not_retry_4xx(monkeypatch, tmp_path):
 
     monkeypatch.setattr(oai, "request", bad)
     cfg = make_cfg(tmp_path, no_cache=True)
-    gw = Gateway(PROVIDERS["openai"], "sk-proj-x", cfg, silent_log())
+    gw = Gateway(PROVIDERS["openai"], "sk-proj-FAKEx", cfg, silent_log())
     with pytest.raises(ProviderError):
         gw.call([{"role": "user", "content": "x"}], "gpt-5")
     assert calls["n"] == 1
@@ -185,7 +185,7 @@ def test_gateway_fails_over_primary_to_cheap(monkeypatch, tmp_path):
     monkeypatch.setattr(oai, "request", fake)
     monkeypatch.setattr("time.sleep", lambda *_: None)
     cfg = make_cfg(tmp_path, no_cache=True)
-    gw = Gateway(PROVIDERS["openai"], "sk-proj-x", cfg, silent_log())
+    gw = Gateway(PROVIDERS["openai"], "sk-proj-FAKEx", cfg, silent_log())
     gw.primary = ModelSpec("big", "T2", 200000)
     gw.cheap = ModelSpec("small", "T0", 100000)
     r = gw.call([{"role": "user", "content": "x"}], "big")
@@ -203,7 +203,7 @@ def test_gateway_cache_avoids_second_call(monkeypatch, tmp_path):
 
     monkeypatch.setattr(oai, "request", fake)
     cfg = make_cfg(tmp_path)
-    gw = Gateway(PROVIDERS["openai"], "sk-proj-x", cfg, silent_log())
+    gw = Gateway(PROVIDERS["openai"], "sk-proj-FAKEx", cfg, silent_log())
     msgs = [{"role": "user", "content": "same"}]
     a = gw.call(msgs, "gpt-5")
     b = gw.call(msgs, "gpt-5")
@@ -221,7 +221,7 @@ def test_gateway_charges_budget(monkeypatch, tmp_path):
     monkeypatch.setattr(oai, "request", fake)
     cfg = make_cfg(tmp_path, no_cache=True)
     budgets = Budgets.from_config(cfg)
-    gw = Gateway(PROVIDERS["openai"], "sk-proj-x", cfg, silent_log(),
+    gw = Gateway(PROVIDERS["openai"], "sk-proj-FAKEx", cfg, silent_log(),
                  budgets=budgets)
     gw.call([{"role": "user", "content": "x"}], "gpt-5", phase="P1")
     assert budgets.tokens.used == 120
@@ -238,7 +238,7 @@ def test_router_sends_judges_to_cheap_model(monkeypatch, tmp_path):
 
     monkeypatch.setattr(oai, "request", fake)
     cfg = make_cfg(tmp_path, no_cache=True)
-    gw = Gateway(PROVIDERS["openai"], "sk-proj-x", cfg, silent_log())
+    gw = Gateway(PROVIDERS["openai"], "sk-proj-FAKEx", cfg, silent_log())
     gw.primary = ModelSpec("big", "T2", 200000)
     gw.cheap = ModelSpec("small", "T0", 100000)
     r = Router(gw, cfg, silent_log())
@@ -259,7 +259,7 @@ def test_router_single_model_clamps_cheap_calls(monkeypatch, tmp_path):
 
     monkeypatch.setattr(oai, "request", fake)
     cfg = make_cfg(tmp_path, no_cache=True)
-    gw = Gateway(PROVIDERS["openai"], "sk-proj-x", cfg, silent_log())
+    gw = Gateway(PROVIDERS["openai"], "sk-proj-FAKEx", cfg, silent_log())
     gw.primary = gw.cheap = ModelSpec("only", "T1", 32000)
     r = Router(gw, cfg, silent_log())
     assert r.single_model
@@ -276,7 +276,7 @@ def test_router_samples_n_replies(monkeypatch, tmp_path):
 
     monkeypatch.setattr(oai, "request", fake)
     cfg = make_cfg(tmp_path, no_cache=True)
-    gw = Gateway(PROVIDERS["openai"], "sk-proj-x", cfg, silent_log())
+    gw = Gateway(PROVIDERS["openai"], "sk-proj-FAKEx", cfg, silent_log())
     gw.primary = gw.cheap = ModelSpec("m", "T0", 32000)
     r = Router(gw, cfg, silent_log())
     out = r.call("p1_localize", [{"role": "user", "content": "x"}], "P1",
@@ -300,7 +300,7 @@ def test_probe_two_attempts_before_declaring_incapable(monkeypatch, tmp_path):
 
     monkeypatch.setattr(oai, "request", fake)
     cfg = make_cfg(tmp_path, no_cache=True)
-    gw = Gateway(PROVIDERS["openai"], "sk-proj-x", cfg, silent_log())
+    gw = Gateway(PROVIDERS["openai"], "sk-proj-FAKEx", cfg, silent_log())
     caps = probe_mod.probe(gw, "m")
     assert n["i"] == 2
     assert caps.tool_calling and caps.strict_json
@@ -313,7 +313,7 @@ def test_probe_failure_assumes_safe_path(monkeypatch, tmp_path):
     monkeypatch.setattr(oai, "request", boom)
     monkeypatch.setattr("time.sleep", lambda *_: None)
     cfg = make_cfg(tmp_path, no_cache=True)
-    gw = Gateway(PROVIDERS["openai"], "sk-proj-x", cfg, silent_log())
+    gw = Gateway(PROVIDERS["openai"], "sk-proj-FAKEx", cfg, silent_log())
     caps = probe_mod.probe(gw, "m")
     assert caps.tool_calling is False and caps.text_protocol is True
     assert caps.strict_json is False
@@ -327,7 +327,7 @@ def test_probe_extracts_json_from_prose(monkeypatch, tmp_path):
 
     monkeypatch.setattr(oai, "request", fake)
     cfg = make_cfg(tmp_path, no_cache=True)
-    gw = Gateway(PROVIDERS["openai"], "sk-proj-x", cfg, silent_log())
+    gw = Gateway(PROVIDERS["openai"], "sk-proj-FAKEx", cfg, silent_log())
     caps = probe_mod.probe(gw, "m", attempts=1)
     assert caps.strict_json is True
     assert caps.tool_calling is False

@@ -99,12 +99,12 @@ def test_phase_budget_shares_sum_sanely(monkeypatch, tmp_path):
 
 # -- T0.4 redaction (NFR-4) ------------------------------------------------
 @pytest.mark.parametrize("secret", [
-    "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv",
-    "sk-or-v1-0123456789abcdef0123",
-    "sk-proj-abcdefghijklmnop12345",
-    "gsk_ABCDEFGHIJKLMNOP1234",
-    "xai-ABCDEFGHIJKLMNOP1234",
-    "AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ0123",
+    "sk-ant-api03-FAKEabcdefghijklmnop",
+    "sk-or-v1-FAKE0123456789abcdef",
+    "sk-proj-FAKEabcdefghijklmnop",
+    "gsk_FAKEabcdefghijklmnop12",
+    "xai-FAKEabcdefghijklmnop12",
+    "AIzaSyFAKEabcdefghijklmnopqrstuvwx01",
 ])
 def test_secrets_are_redacted(secret):
     out = redact(f"calling provider with {secret} now")
@@ -114,7 +114,7 @@ def test_secrets_are_redacted(secret):
 
 def test_logger_redacts_the_live_key():
     buf = io.StringIO()
-    key = "sk-ant-api03-LIVEKEY1234567890"
+    key = "sk-ant-api03-FAKELIVEKEY1234567890"
     log = Logger(secrets=[key], stream=buf)
     log.line(f"auth header {key}")
     assert key not in buf.getvalue()
@@ -188,7 +188,7 @@ def test_large_payload_becomes_a_blob(tmp_path):
 
 
 def test_event_log_redacts_secrets(tmp_path):
-    key = "sk-ant-api03-SECRETKEY0987654321"
+    key = "sk-ant-api03-FAKESECRETKEY0987654321"
     log = EventLog(tmp_path, secrets=[key])
     log.append("model_request", "P1", {"headers": {"x-api-key": key}})
     assert key not in (tmp_path / "trajectory.jsonl").read_text()

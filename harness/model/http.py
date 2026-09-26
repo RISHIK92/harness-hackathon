@@ -29,8 +29,8 @@ def request(method: str, url: str, headers: dict, body: dict | None = None,
         detail = ""
         try:
             detail = exc.read().decode("utf-8", errors="replace")[:400]
-        except Exception:
-            pass
+        except (OSError, ValueError, AttributeError):
+            detail = "<error body unavailable>"
         retry_after = None
         try:
             ra = exc.headers.get("Retry-After") if exc.headers else None

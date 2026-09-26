@@ -34,5 +34,6 @@ class PhaseContext:
         try:
             self.events.append("degradation", "--", {"tag": tag,
                                                      "detail": detail})
-        except Exception:
-            pass
+        except (OSError, ValueError):
+            # Losing a trace line must never turn a degradation into a crash.
+            self.log.debug(f"could not record degradation {tag}")
