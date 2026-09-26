@@ -46,6 +46,7 @@ def make(name: str, files: dict, meta: dict, commits: list | None = None) -> Pat
                 write(repo, rel, text)
             git(repo, "add", "-A")
             git(repo, "commit", "-q", "-m", message)
+    files.setdefault("pytest.ini", PYTEST_INI)
     for rel, text in files.items():
         write(repo, rel, text)
     git(repo, "add", "-A")
@@ -56,6 +57,11 @@ def make(name: str, files: dict, meta: dict, commits: list | None = None) -> Pat
     git(repo, "commit", "-q", "-m", "add fixture metadata")
     return repo
 
+
+PYTEST_INI = """
+[pytest]
+testpaths = tests
+"""
 
 PYPROJECT = """
 [build-system]
