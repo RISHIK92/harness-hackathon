@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import keys as K
+from .screen import Screen
 from .ui import human_time
 
 HISTORY_LIMIT = 5
@@ -48,12 +49,51 @@ class Console:
     cfg: object
     source: K.KeySource = None
     stream: object = None
+    screen: object = None
     _lines_drawn: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         self.stream = self.stream or sys.stdout
         if self.source is None:
             self.source = K.reader()
+
+    # -- full-screen ownership --------------------------------------------
+    @property
+    def full(self) -> bool:
+        return self.screen is not None and self.screen.open_
+
+    def take_terminal(self) -> bool:
+        """Own the whole terminal for the session. Falls back to inline
+        rendering when the terminal is too small or is not a terminal."""
+        if self.screen is None:
+            self.screen = Screen(self.stream, self.log.theme,
+                                 getattr(self.log, "unicode", True))
+        if not self.screen.open():
+            return False
+        self.screen.set_header(self._header_lines())
+        self.log.attach_screen(self.screen)
+        self.screen.render()
+        return True
+
+    def release_terminal(self) -> str:
+        """Leave the alternate buffer and hand back the transcript, so the
+        session is in scrollback rather than lost with the frame."""
+        if self.screen is None:
+            return ""
+        transcript = self.screen.close()
+        self.log.detach_screen()
+        return transcript
+
+    def _header_lines(self) -> list:
+        t = self.log.theme
+        bar = "\u2500" * 62 if getattr(self.log, "unicode", True) else "-" * 62
+        mark = "\u25c8" if getattr(self.log, "unicode", True) else "#"
+        return [
+            f"  {t.accent}{bar}{t.reset}",
+            f"  {t.bold}{mark} HARNESS{t.reset}   "
+            f"{t.dim}{self.cfg.repo_path}{t.reset}",
+            f"  {t.accent}{bar}{t.reset}",
+        ]
 
     # -- drawing -----------------------------------------------------------
     def _w(self, text: str = "") -> None:
@@ -64,14 +104,38 @@ class Console:
         self.stream.flush()
 
     def _erase(self) -> None:
-        """Rub out what we drew, so a menu redraws in place."""
+        """Rub out what we drew, so a menu redraws in place.
+
+        Only used in inline mode. It counts LOGICAL lines, so a line that
+        wraps leaves a stale copy behind -- which is exactly why the
+        full-screen path composes an absolute frame instead.
+        """
         if self._lines_drawn and getattr(self.log, "rich", False):
             self.stream.write(f"\x1b[{self._lines_drawn}A\x1b[0J")
         self._lines_drawn = 0
 
+    def _draw(self, lines: list) -> None:
+        """Show a panel: a frame when we own the terminal, inline otherwise."""
+        if self.full:
+            self.screen.set_panel(lines)
+            self.screen.render()
+            return
+        self._erase()
+        for line in lines:
+            self._w(line)
+        self._flush()
+
+    def _undraw(self) -> None:
+        if self.full:
+            self.screen.set_panel(None)
+            self.screen.render()
+            return
+        self._erase()
+
     def menu(self, title: str, items: list, hint: str = "") -> int | None:
         """Render a menu and return the chosen index, or None to go back."""
         t = self.log.theme
+        self.source.enter_raw()      # ask_line() drops out of raw mode
         selected = 0
         enabled = [i for i, it in enumerate(items) if it.enabled]
         if not enabled:
@@ -79,27 +143,23 @@ class Console:
         selected = enabled[0]
 
         while True:
-            self._erase()
-            self._w()
-            self._w(f"    {t.bold}{title}{t.reset}")
-            self._w()
+            lines = ["", f"    {t.bold}{title}{t.reset}", ""]
             for i, item in enumerate(items):
                 mark = self.log.g.PHASE if i == selected else " "
                 colour = t.accent if i == selected else ""
                 body = item.label.ljust(30)
                 if not item.enabled:
                     body = f"{t.dim}{body}{t.reset}"
-                self._w(f"  {t.paint(mark, t.accent)} "
-                        f"{t.paint(body, colour)}"
-                        f"{t.dim}{item.hint}{t.reset}")
-            self._w()
-            self._w(f"    {t.dim}{hint or '↑↓ move   tab run   q quit'}"
-                    f"{t.reset}")
-            self._flush()
+                lines.append(f"  {t.paint(mark, t.accent)} "
+                             f"{t.paint(body, colour)}"
+                             f"{t.dim}{item.hint}{t.reset}")
+            lines += ["", f"    {t.dim}"
+                          f"{hint or '↑↓ move   tab run   q quit'}{t.reset}"]
+            self._draw(lines)
 
             key = self.source.read()
             if key in (K.CTRL_C, "q", K.ESC):
-                self._erase()
+                self._undraw()
                 return None
             if key == K.UP:
                 here = enabled.index(selected)
@@ -108,18 +168,80 @@ class Console:
                 here = enabled.index(selected)
                 selected = enabled[(here + 1) % len(enabled)]
             elif key in (K.TAB, K.ENTER):
-                self._erase()
+                self._undraw()
                 return selected
             elif key.isdigit() and 1 <= int(key) <= len(items):
                 idx = int(key) - 1
                 if items[idx].enabled:
-                    self._erase()
+                    self._undraw()
                     return idx
 
     # -- input -------------------------------------------------------------
+    def _edit(self, title: str, hint: str, default: str = "",
+              multiline: bool = False) -> str | None:
+        """A line editor inside the frame.
+
+        Reading in raw mode rather than calling input() keeps us inside the
+        alternate screen: dropping out to cooked mode for every prompt makes
+        the whole interface flicker between two screens.
+        """
+        t = self.log.theme
+        self.source.enter_raw()
+        lines: list = [default] if default else [""]
+        row = 0
+        while True:
+            panel = ["", f"    {t.bold}{title}{t.reset}"]
+            if hint:
+                panel.append(f"    {t.dim}{hint}{t.reset}")
+            panel.append("")
+            for i, text in enumerate(lines):
+                caret = f"{t.accent}\u2588{t.reset}" if i == row else ""
+                mark = self.log.g.PHASE if i == row else " "
+                panel.append(f"  {t.paint(mark, t.accent)} {text}{caret}")
+            panel.append("")
+            panel.append(f"    {t.dim}"
+                         + ("enter newline   tab done   esc cancel"
+                            if multiline else "enter/tab done   esc cancel")
+                         + f"{t.reset}")
+            self._draw(panel)
+
+            key = self.source.read()
+            if key in (K.ESC, K.CTRL_C):
+                self._undraw()
+                return None
+            if key == K.CTRL_D or key == K.TAB:
+                break
+            if key == K.ENTER:
+                if not multiline:
+                    break
+                lines.insert(row + 1, "")
+                row += 1
+                continue
+            if key == K.BACKSPACE:
+                if lines[row]:
+                    lines[row] = lines[row][:-1]
+                elif multiline and row > 0:
+                    lines.pop(row)
+                    row -= 1
+                continue
+            if key == K.UP and row > 0:
+                row -= 1
+                continue
+            if key == K.DOWN and row < len(lines) - 1:
+                row += 1
+                continue
+            if len(key) == 1 and key.isprintable():
+                lines[row] += key
+
+        self._undraw()
+        value = "\n".join(lines).strip()
+        return value or None
+
     def ask_line(self, title: str, hint: str = "",
                  default: str = "") -> str | None:
         """One line of text, with normal line editing."""
+        if self.full:
+            return self._edit(title, hint, default)
         t = self.log.theme
         self._w()
         self._w(f"    {t.bold}{title}{t.reset}")
@@ -127,9 +249,7 @@ class Console:
             self._w(f"    {t.dim}{hint}{t.reset}")
         self._w()
         self._flush()
-        close_raw = getattr(self.source, "close", None)
-        if close_raw:
-            self.source.close()          # normal line editing while typing
+        self.source.close()              # normal line editing while typing
         try:
             try:
                 import readline           # noqa: F401  (enables editing)
@@ -140,51 +260,49 @@ class Console:
         except (EOFError, KeyboardInterrupt):
             return None
         finally:
-            enter_raw = getattr(self.source, "enter_raw", None)
-            if enter_raw:
-                enter_raw()
+            self.source.enter_raw()
         return value or None
 
     def ask_paste(self) -> str | None:
+        if self.full:
+            return self._edit("Describe the issue",
+                              "enter for a new line, tab when you are done",
+                              multiline=True)
         t = self.log.theme
         self._w()
         self._w(f"    {t.bold}Paste the issue{t.reset}")
         self._w(f"    {t.dim}finish with Ctrl-D on a blank line{t.reset}")
         self._w()
         self._flush()
-        if getattr(self.source, "close", None):
-            self.source.close()
+        self.source.close()
         try:
             data = sys.stdin.read()
         except (EOFError, KeyboardInterrupt):
             return None
         finally:
-            if getattr(self.source, "enter_raw", None):
-                self.source.enter_raw()
+            self.source.enter_raw()
         return data.strip() or None
 
     def card(self, title: str, rows: list, hint: str) -> bool:
         """A confirmation beat before something outward-facing."""
         t = self.log.theme
-        self._erase()
-        self._w()
-        self._w(f"  {t.paint(self.log.g.COMPUTED, t.computed)} "
-                f"{t.bold}{title}{t.reset}")
+        lines = ["", f"  {t.paint(self.log.g.COMPUTED, t.computed)} "
+                     f"{t.bold}{title}{t.reset}"]
         for key, value in rows:
             if key:
-                self._w(f"    {t.dim}{key.ljust(14)}{t.reset}{value}")
+                lines.append(f"    {t.dim}{key.ljust(14)}{t.reset}{value}")
             else:
-                self._w(f"    {t.dim}{value}{t.reset}")
-        self._w()
-        self._w(f"    {t.dim}{hint}{t.reset}")
-        self._flush()
+                lines.append(f"    {t.dim}{value}{t.reset}")
+        lines += ["", f"    {t.dim}{hint}{t.reset}"]
+        self._draw(lines)
+        self.source.enter_raw()
         while True:
             key = self.source.read()
             if key in (K.TAB, K.ENTER, "y"):
-                self._erase()
+                self._undraw()
                 return True
             if key in (K.ESC, "q", "n", K.CTRL_C):
-                self._erase()
+                self._undraw()
                 return False
 
     # -- history -----------------------------------------------------------

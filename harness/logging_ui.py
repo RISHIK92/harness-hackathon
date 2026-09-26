@@ -75,6 +75,7 @@ class Logger:
         self.started = time.time()
         self._phase = "--"
         self._counters = None          # set by the orchestrator
+        self.screen = None             # set when the console owns the screen
 
     # -- live status -------------------------------------------------------
     def bind_counters(self, fn) -> None:
@@ -82,18 +83,46 @@ class Logger:
         self._counters = fn
 
     def working(self, text: str) -> None:
+        if self.screen is not None and self.screen.open_:
+            suffix = ""
+            if self._counters:
+                try:
+                    suffix = self._counters() or ""
+                except Exception:
+                    suffix = ""
+            t = self.theme
+            self.screen.set_status(
+                f"  {t.paint(self.g.PHASE, t.accent)} {text}"
+                f"{t.dim}{suffix}{t.reset}")
+            self.screen.render()
+            return
         self.status.set(text, self._counters)
 
     def done_working(self) -> None:
+        if self.screen is not None:
+            self.screen.set_status("")
         self.status.clear()
 
     def close(self) -> None:
         self.status.stop()
 
     # -- primitives --------------------------------------------------------
+    def attach_screen(self, screen) -> None:
+        """Send output into a full-screen frame instead of the stream."""
+        self.screen = screen
+
+    def detach_screen(self) -> str:
+        screen, self.screen = self.screen, None
+        return screen.transcript() if screen else ""
+
     def _write(self, text: str) -> None:
+        clean = redact(text, self.secrets)
+        if self.screen is not None and self.screen.open_:
+            self.screen.append(clean)
+            self.screen.render()
+            return
         self.status.clear()
-        self.stream.write(redact(text, self.secrets) + "\n")
+        self.stream.write(clean + "\n")
         self.stream.flush()
 
     def raw(self, text: str = "") -> None:

@@ -44,12 +44,12 @@ def _interactive(cfg, log) -> int:
     from . import github
 
     ui = C.Console(log=log, cfg=cfg)
+    owned = ui.take_terminal()
     last = exits.NO_FIX
     try:
         while True:
             choice = ui.select_task()
             if not choice:
-                log.raw("")
                 return last if last != exits.NO_FIX else exits.SUCCESS
 
             cfg.issue = choice.issue
@@ -77,8 +77,12 @@ def _interactive(cfg, log) -> int:
             if ui.after_run(last, cfg, report, cfg.github) != "again":
                 return last
     finally:
-        if getattr(ui.source, "close", None):
-            ui.source.close()
+        ui.source.close()
+        transcript = ui.release_terminal()
+        if owned and transcript.strip():
+            # Hand the session back to scrollback: a full-screen UI that
+            # swallows its own output would be worse than no UI.
+            print(transcript)
 
 
 def main(argv: list[str] | None = None) -> int:

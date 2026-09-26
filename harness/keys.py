@@ -30,6 +30,9 @@ class KeySource:
     def read(self) -> str:                        # pragma: no cover - iface
         raise NotImplementedError
 
+    def enter_raw(self) -> None:
+        """No-op for sources that need no terminal state."""
+
     def close(self) -> None:
         pass
 
@@ -146,8 +149,14 @@ class TerminalKeys(KeySource):
 
 
 def reader(stream=None) -> KeySource:
-    """A terminal reader when one is possible, else a scripted quit."""
+    """A terminal reader, already in raw mode, or a scripted quit.
+
+    Entering raw mode here rather than leaving it to the caller is the whole
+    point: a reader that is not in cbreak mode gives line-buffered input with
+    echo on, so arrow keys print `^[[B` and nothing responds until Enter.
+    """
     term = TerminalKeys(stream)
     if term.available:
+        term.enter_raw()
         return term
     return ScriptedKeys([])
