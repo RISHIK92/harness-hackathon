@@ -78,6 +78,11 @@ class Implementation:
                        self.failures)
 
         span = self._span(root_cause, path, target.symbol)
+        if fmt == F.LINE_RANGE and not span[1]:
+            # No resolvable range: LINE_RANGE would emit `path:0-0`, which can
+            # never apply. Use a format that does not need one.
+            fmt = (F.WHOLE_FILE if file_lines <= F.WHOLE_FILE_MAX_LINES
+                   else F.SEARCH_REPLACE)
         messages = self._messages(issue, root_cause, plan, target, fmt, span,
                                   feedback)
         c.log.line(f"format {fmt}  target {path}"
@@ -95,7 +100,13 @@ class Implementation:
         for e in edits:
             c.log.cont(e.summary())
 
-        applied = apply_all(c.repo, edits)
+        try:
+            applied = apply_all(c.repo, edits)
+        except EditFailure:
+            # Counting this is what makes the format ladder de-escalate; not
+            # counting it retries the identical edit until the cycle cap.
+            self.failures += 1
+            raise
         try:
             flags = validate(c.repo, applied, plan, c.cfg, c.toolchain)
         except EditFailure:
@@ -118,13 +129,29 @@ class Implementation:
 
     # -- context -----------------------------------------------------------
     def _span(self, root_cause, path: str, symbol: str | None) -> tuple:
+        """A line range, validated against the file it refers to.
+
+        The range comes from the model, so it can point past the end of the
+        file. Handing that to LINE_RANGE produces an edit that can never
+        apply, and the harness would retry it unchanged.
+        """
+        try:
+            total = len((self.ctx.repo / path).read_text(
+                "utf-8", errors="replace").splitlines())
+        except OSError:
+            total = 0
+
         for f in root_cause.files:
             if f.path == path and f.lines and f.lines[1]:
-                return (max(1, f.lines[0]), f.lines[1])
+                start, end = max(1, f.lines[0]), f.lines[1]
+                if total and start <= total:
+                    return (start, min(end, total))
+                break          # out of range: fall through to the symbol
+
         if symbol:
             for sym in symbols(self.ctx.repo / path):
                 if sym.name == symbol:
-                    return (sym.start, sym.end)
+                    return (sym.start, min(sym.end, total or sym.end))
         return (0, 0)
 
     def _messages(self, issue, root_cause, plan, target, fmt, span,

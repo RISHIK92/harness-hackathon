@@ -213,6 +213,16 @@ def respond(body: dict, wire: str = "openai") -> dict:
         search, replacement = _fix_for(prompt)
         if search is None:
             return _reply(prompt, "I cannot determine the fix.", wire=wire)
+        if "<<<<<<< FILE" in prompt:
+            # WHOLE_FILE: the harness shows the code; splice the fix into it.
+            m = re.search(r"THE CODE TO CHANGE:\n(.*?)\n\nCONSTRAINTS",
+                          prompt, re.S)
+            body = m.group(1) if m else ""
+            body = re.sub(r"^\s*\d+\s*\|\s?", "", body, flags=re.M)
+            if search.strip() and search.strip() in body:
+                body = body.replace(search, replacement, 1)
+            return _reply(prompt, f"<<<<<<< FILE {path}\n{body}\n>>>>>>>",
+                          wire=wire)
         if "REPLACE {0}:".format(path) in prompt or "<<<<<<< REPLACE" in prompt:
             m = re.search(r"REPLACE \S+?:(\d+)-(\d+)", prompt)
             if m:

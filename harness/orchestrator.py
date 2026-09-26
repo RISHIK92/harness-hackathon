@@ -6,6 +6,7 @@ testable in isolation (NFR-5).
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -117,7 +118,7 @@ class Orchestrator:
 
         signals = Signals(
             sbfl=sbfl.top_files(6) if sbfl.ok else [],
-            lexical=issue.anchors.files[:6],
+            lexical=self._lexical_signal(ctx, issue),
             structural=[f for f, _l, _fn in issue.anchors.frames][:6],
             historical=[],
         )
@@ -313,6 +314,40 @@ class Orchestrator:
         self.log.raw("=== DIFF ===")
         self.log.raw(self.workspace.diff() or "(no changes)")
         return summary.exit_code
+
+    @staticmethod
+    def _lexical_signal(ctx, issue) -> list:
+        """Files the issue's identifiers actually appear in.
+
+        Paths named in the issue text are the easy case; most issues name a
+        symbol or an error string instead, and without this the lexical
+        signal is empty whenever coverage is unavailable.
+        """
+        from .localize.sbfl import is_test_path
+        from .repo.search import is_source
+
+        scores: dict = {}
+        for path in issue.anchors.files:
+            scores[path] = scores.get(path, 0) + 5
+        needles = [s.split(".")[-1] for s in issue.anchors.symbols[:5]]
+        needles += [e.strip().split(":")[0] for e in issue.anchors.errors[:3]]
+        for needle in needles:
+            if not needle or len(needle) < 4:
+                continue
+            for hit in ctx.search.grep(rf"\b{re.escape(needle)}\b",
+                                       max_hits=30):
+                if not is_source(hit.path) or is_test_path(hit.path):
+                    continue
+                # A file that DEFINES the symbol outranks one that merely
+                # imports or mentions it -- otherwise a package __init__ that
+                # re-exports the name wins on hit count alone.
+                defines = re.search(
+                    rf"^\s*(def|class|func|fn|function)\s+{re.escape(needle)}\b",
+                    hit.text)
+                scores[hit.path] = scores.get(hit.path, 0) + (8 if defines
+                                                              else 1)
+        ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+        return [p for p, _ in ranked][:6]
 
     # -- loop helpers ------------------------------------------------------
     def _stuck(self, watch, phase: str) -> bool:
