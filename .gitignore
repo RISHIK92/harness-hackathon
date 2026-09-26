@@ -8,3 +8,4 @@ coverage.json
 .worktrees/
 *.log
 .env
+tests/fixtures/
