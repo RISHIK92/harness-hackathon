@@ -56,6 +56,7 @@ class TerminalKeys(KeySource):
 
     def __init__(self, stream=None) -> None:
         self.stream = stream or sys.stdin
+        self._buf = ""                    # unconsumed input
         try:
             self.fd = self.stream.fileno()
         except (AttributeError, ValueError, OSError, io.UnsupportedOperation):
@@ -124,27 +125,78 @@ class TerminalKeys(KeySource):
             self._saved = None
 
     # -- reading -----------------------------------------------------------
-    def read(self) -> str:
-        ch = os.read(self.fd, 1).decode("utf-8", "replace")
-        if ch == "\x03":
-            return CTRL_C
-        if ch == "\x04":
-            return CTRL_D
-        if ch in ("\r", "\n"):
-            return ENTER
-        if ch == "\t":
-            return TAB
-        if ch in ("\x7f", "\b"):
-            return BACKSPACE
-        if ch != "\x1b":
-            return ch
+    def _fill(self, timeout: float | None = None) -> bool:
+        """Pull whatever is available into the buffer. True if anything came."""
+        if timeout is not None and not select.select([self.fd], [], [],
+                                                     timeout)[0]:
+            return False
+        try:
+            data = os.read(self.fd, 64)
+        except OSError:
+            return False
+        if not data:
+            return False
+        self._buf += data.decode("utf-8", "replace")
+        return True
 
-        # an escape sequence, or a bare Esc if nothing follows promptly
-        if not select.select([self.fd], [], [], 0.05)[0]:
+    def read(self) -> str:
+        """One keypress.
+
+        Parsed from a buffer rather than byte by byte, because input arrives
+        in bursts: an Esc can land in the same read as the arrow key that
+        follows it, and consuming a fixed two bytes after an Esc destroys
+        whatever came next.
+        """
+        while True:
+            key = self._take()
+            if key is not None:
+                return key
+            if self._buf:
+                continue               # still parsing what we already have
+            if not self._fill():
+                return CTRL_C          # the stream closed under us
+
+    def _take(self) -> str | None:
+        """Consume one key from the buffer, or None if more input is needed."""
+        buf = self._buf
+        if not buf:
+            return None
+
+        ch = buf[0]
+        if ch != "\x1b":
+            self._buf = buf[1:]
+            return {"\x03": CTRL_C, "\x04": CTRL_D, "\r": ENTER,
+                    "\n": ENTER, "\t": TAB, "\x7f": BACKSPACE,
+                    "\b": BACKSPACE}.get(ch, ch)
+
+        # An escape: either a sequence we know, or a bare Esc.
+        if len(buf) == 1:
+            # Wait briefly for the rest of a sequence before calling it Esc.
+            if self._fill(timeout=0.05) and len(self._buf) > 1:
+                return self._take()
+            self._buf = buf[1:]
             return ESC
-        rest = os.read(self.fd, 2).decode("utf-8", "replace")
-        if rest.startswith("[") and rest[1:2] in ARROWS:
-            return ARROWS[rest[1]]
+        if buf[1] == "[":
+            # A CSI sequence runs until a byte in @-~. Consuming a fixed
+            # length instead would leave a tail that reads as junk keys.
+            end = None
+            for i in range(2, len(buf)):
+                if "\x40" <= buf[i] <= "\x7e":
+                    end = i
+                    break
+            if end is None:
+                if self._fill(timeout=0.05) and len(self._buf) > len(buf):
+                    return self._take()
+                self._buf = buf[2:]           # unterminated: treat as Esc
+                return ESC
+            if end == 2 and buf[2] in ARROWS:
+                self._buf = buf[3:]
+                return ARROWS[buf[2]]
+            self._buf = buf[end + 1:]         # a sequence we do not use
+            return None
+        # Esc followed by something that is not a sequence: a real Esc, and
+        # the next key is left in the buffer where it belongs.
+        self._buf = buf[1:]
         return ESC
 
 

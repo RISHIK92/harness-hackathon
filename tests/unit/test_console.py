@@ -240,3 +240,109 @@ def test_terminal_reader_is_unavailable_without_a_tty():
 
 def test_reader_falls_back_when_there_is_no_terminal():
     assert isinstance(K.reader(io.StringIO()), K.ScriptedKeys)
+
+
+# -- cancelling goes back, it does not quit --------------------------------
+def test_escape_in_the_paste_editor_returns_to_the_menu(tmp_path,
+                                                        monkeypatch):
+    """Cancelling a prompt must not end the session -- only q on the menu
+    does that."""
+    monkeypatch.chdir(tmp_path)
+    ui, buf, cfg = make([K.TAB, "q"], tmp_path)     # pick paste, then quit
+    calls = {"n": 0}
+
+    def cancelled():
+        calls["n"] += 1
+        return None                                  # the user pressed esc
+
+    monkeypatch.setattr(ui, "ask_paste", cancelled)
+    choice = ui.select_task()
+    assert calls["n"] == 1, "the paste editor should have been opened once"
+    assert choice.quit, "and then q on the menu ends it"
+    assert "What should I work on?" in buf.getvalue()
+
+
+def test_cancelling_the_github_prompt_returns_to_the_menu(tmp_path,
+                                                          monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ui, buf, cfg = make([K.DOWN, K.TAB, "q"], tmp_path)
+    monkeypatch.setattr(ui, "ask_line", lambda *a, **k: None)
+    assert ui.select_task().quit
+
+
+def test_cancelling_then_choosing_still_works(tmp_path, monkeypatch):
+    """Back out of paste, then pick GitHub: the menu must still be live."""
+    monkeypatch.chdir(tmp_path)
+    ui, buf, cfg = make([K.TAB, K.DOWN, K.TAB], tmp_path)
+    monkeypatch.setattr(ui, "ask_paste", lambda: None)
+    monkeypatch.setattr(ui, "ask_line", lambda *a, **k: "owner/repo#9")
+    choice = ui.select_task()
+    assert choice.github_ref == "owner/repo#9"
+    assert not choice.quit
+
+
+def test_repeated_back_navigation_does_not_recurse(tmp_path, monkeypatch):
+    """Twenty cancels must not pile up stack frames."""
+    monkeypatch.chdir(tmp_path)
+    ui, buf, cfg = make([K.TAB] * 20 + ["q"], tmp_path)
+    monkeypatch.setattr(ui, "ask_paste", lambda: None)
+    depth = {"max": 0}
+    import sys as _sys
+    base = len(_sys._current_frames())
+
+    def counting():
+        import traceback
+        depth["max"] = max(depth["max"], len(traceback.extract_stack()))
+        return None
+
+    monkeypatch.setattr(ui, "ask_paste", counting)
+    first = None
+    ui.select_task()
+    assert depth["max"] < 100, "back-navigation is recursing"
+
+
+# -- the key parser --------------------------------------------------------
+def _parse(data: bytes, count: int) -> list:
+    """Drive the real parser from a pipe: no terminal, no timing."""
+    import os
+    import termios
+    import tty
+
+    from harness.keys import TerminalKeys
+    r, w = os.pipe()
+    os.write(w, data)
+    os.close(w)
+    src = TerminalKeys.__new__(TerminalKeys)
+    src.fd, src._buf, src._saved = r, "", None
+    src._registered, src._termios, src._tty = False, termios, tty
+    try:
+        return [src.read() for _ in range(count)]
+    finally:
+        os.close(r)
+
+
+@pytest.mark.parametrize("data,count,expected", [
+    (b"abc", 3, ["a", "b", "c"]),
+    (b"\x1b[B", 1, [K.DOWN]),
+    (b"\x1b[A", 1, [K.UP]),
+    (b"\x1b[A\x1b[B", 2, [K.UP, K.DOWN]),
+    (b"\x1b", 1, [K.ESC]),
+    (b"\t\r\x7f", 3, [K.TAB, K.ENTER, K.BACKSPACE]),
+    (b"\x03", 1, [K.CTRL_C]),
+    (b"\x04", 1, [K.CTRL_D]),
+    (b"hi\x1b[Bq", 4, ["h", "i", K.DOWN, "q"]),
+])
+def test_key_parsing(data, count, expected):
+    assert _parse(data, count) == expected
+
+
+def test_escape_adjacent_to_the_next_key_loses_neither():
+    """Input arrives in bursts. Consuming a fixed two bytes after an Esc
+    destroys whatever followed -- which is how pressing esc then down ended
+    up doing nothing."""
+    assert _parse(b"\x1b\x1b[B", 2) == [K.ESC, K.DOWN]
+    assert _parse(b"\x1b\x1b[Aq", 3) == [K.ESC, K.UP, "q"]
+
+
+def test_an_unknown_escape_sequence_does_not_eat_the_next_key():
+    assert _parse(b"\x1b[5~\x1b[B", 1) == [K.DOWN]

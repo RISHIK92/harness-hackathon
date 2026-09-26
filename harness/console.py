@@ -271,7 +271,7 @@ class Console:
         t = self.log.theme
         self._w()
         self._w(f"    {t.bold}Paste the issue{t.reset}")
-        self._w(f"    {t.dim}finish with Ctrl-D on a blank line{t.reset}")
+        self._w(f"    {t.dim}Ctrl-D to finish, Ctrl-C to cancel{t.reset}")
         self._w()
         self._flush()
         self.source.close()
@@ -335,50 +335,63 @@ class Console:
 
     # -- the flow ----------------------------------------------------------
     def select_task(self, bootstrap=None) -> Choice:
-        """Ask what to work on. Returns an empty Choice to quit."""
+        """Ask what to work on. Returns an empty Choice only to quit.
+
+        Cancelling a prompt goes BACK to the menu; only `q` on the menu
+        itself ends the session. A loop rather than recursion, so backing
+        out repeatedly cannot pile up stack frames.
+        """
         self._header(bootstrap)
-        past = self.history()
-        items = [
-            Item("paste an issue", "multi-line, Ctrl-D to finish"),
-            Item("github issue or pull request", "owner/repo#123"),
-            Item("a local repository", str(self.cfg.repo_path)),
-            Item("recent", f"{len(past)} previous run(s)", enabled=bool(past)),
-        ]
-        picked = self.menu("What should I work on?", items)
-        if picked is None:
-            return Choice(quit=True)
+        while True:
+            past = self.history()
+            items = [
+                Item("paste an issue", "write it in place, tab when done"),
+                Item("github issue or pull request", "owner/repo#123"),
+                Item("a local repository", str(self.cfg.repo_path)),
+                Item("recent", f"{len(past)} previous run(s)",
+                     enabled=bool(past)),
+            ]
+            picked = self.menu("What should I work on?", items)
+            if picked is None:
+                return Choice(quit=True)
 
-        if picked == 0:
-            text = self.ask_paste()
-            return Choice(issue=text or "", quit=not text)
+            if picked == 0:
+                text = self.ask_paste()
+                if not text:
+                    continue                       # cancelled: back to menu
+                return Choice(issue=text)
 
-        if picked == 1:
-            ref = self.ask_line(
-                "GitHub issue or pull request",
-                "owner/repo#123, or a full issue or pull-request URL")
-            if not ref:
-                return self.select_task(bootstrap)
-            return Choice(issue=ref, github_ref=ref)
+            if picked == 1:
+                ref = self.ask_line(
+                    "GitHub issue or pull request",
+                    "owner/repo#123, or a full issue or pull-request URL")
+                if not ref:
+                    continue
+                return Choice(issue=ref, github_ref=ref)
 
-        if picked == 2:
-            path = self.ask_line("Repository", "absolute or relative path",
-                                 default=str(self.cfg.repo_path))
-            if not path:
-                return self.select_task(bootstrap)
-            repo = Path(path).expanduser().resolve()
-            if not repo.is_dir():
-                self._note(f"no such directory: {repo}")
-                return self.select_task(bootstrap)
-            text = self.ask_paste()
-            return Choice(issue=text or "", repo=repo, quit=not text)
+            if picked == 2:
+                path = self.ask_line("Repository",
+                                     "absolute or relative path",
+                                     default=str(self.cfg.repo_path))
+                if not path:
+                    continue
+                repo = Path(path).expanduser().resolve()
+                if not repo.is_dir():
+                    self._note(f"no such directory: {repo}")
+                    continue
+                text = self.ask_paste()
+                if not text:
+                    continue
+                return Choice(issue=text, repo=repo)
 
-        entries = [Item(e["issue"].splitlines()[0][:44],
-                        f"{e['when']}  exit {e['exit']}") for e in past]
-        which = self.menu("Recent runs", entries, "↑↓ move   tab rerun   esc back")
-        if which is None:
-            return self.select_task(bootstrap)
-        chosen = past[which]
-        return Choice(issue=chosen["issue"], repo=Path(chosen["repo"]))
+            entries = [Item(e["issue"].splitlines()[0][:44],
+                            f"{e['when']}  exit {e['exit']}") for e in past]
+            which = self.menu("Recent runs", entries,
+                              "↑↓ move   tab rerun   esc back")
+            if which is None:
+                continue
+            chosen = past[which]
+            return Choice(issue=chosen["issue"], repo=Path(chosen["repo"]))
 
     def confirm_github(self, fetched, target: Path, cfg) -> bool:
         rows = [

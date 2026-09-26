@@ -24,6 +24,7 @@ pytestmark = pytest.mark.skipif(
 UP = b"\x1b[A"
 DOWN = b"\x1b[B"
 TAB = b"\t"
+ESC_B = b"\x1b"
 
 
 def _reattach_std():
@@ -35,7 +36,20 @@ def _reattach_std():
     sys.stdout = os.fdopen(1, "w", buffering=1)
 
 
-def drive(script: bytes, settle: float = 0.45) -> str:
+def keys(*items) -> list:
+    """Split a script into individual keypresses. Sending an Esc in the same
+    burst as the next key is not how a human types, and it makes the reader
+    look broken when it is not."""
+    out = []
+    for item in items:
+        if item in (UP, DOWN, TAB, ESC_B, b"\r"):
+            out.append(item)
+        else:
+            out.extend(bytes([b]) for b in item)
+    return out
+
+
+def drive(script, settle: float = 0.45) -> str:
     """Run the console in a child attached to a pty; return what it wrote."""
     pid, fd = pty.fork()
     if pid == 0:                                   # child
@@ -73,12 +87,14 @@ def drive(script: bytes, settle: float = 0.45) -> str:
     deadline = time.time() + 12
     try:
         time.sleep(settle)                         # let the menu draw
-        for chunk in (script[i:i + 3] for i in range(0, len(script), 3)):
+        chunks = script if isinstance(script, list) else \
+            [script[i:i + 1] for i in range(len(script))]
+        for chunk in chunks:
             try:
                 os.write(fd, chunk)
             except OSError:
                 break          # the child already finished
-            time.sleep(0.12)
+            time.sleep(0.06)
         while time.time() < deadline:
             r, _, _ = select.select([fd], [], [], 0.3)
             if not r:
@@ -108,7 +124,7 @@ def drive(script: bytes, settle: float = 0.45) -> str:
 
 def test_arrow_keys_are_not_echoed_as_escape_sequences():
     """The regression: ^[[B appearing on screen means raw mode is off."""
-    out = drive(DOWN + DOWN + b"q")
+    out = drive(keys(DOWN, DOWN, b"q"))
     assert "^[[B" not in out, "arrow keys are being echoed: raw mode is off"
     assert "[B[B" not in out
 
@@ -117,20 +133,20 @@ def test_arrows_navigate_and_the_in_frame_editor_accepts_text():
     """One pass proving three things: the selection moves on the keypress,
     the second item opens the reference editor, and typing inside the frame
     reaches the choice."""
-    out = drive(DOWN + TAB + b"a/b#7" + TAB)
+    out = drive(keys(DOWN, TAB, b"a/b#7", TAB))
     assert "CHILD-ERROR" not in out, out[-400:]
     assert "CHOICE=a/b#7|go" in out, out[-400:]
 
 
 def test_q_quits_immediately():
-    out = drive(b"q")
+    out = drive(keys(b"q"))
     assert "CHOICE=|quit" in out, out[-400:]
 
 
 def test_the_terminal_is_taken_and_given_back():
     """The alternate screen is entered on start and left on exit, so the
     user's scrollback survives."""
-    out = drive(b"q")
+    out = drive(keys(b"q"))
     assert "OWNED=True" in out, out[-400:]
     assert "\x1b[?1049h" in out, "the alternate screen was never entered"
     assert "\x1b[?1049l" in out, "the alternate screen was never left"
@@ -139,7 +155,7 @@ def test_the_terminal_is_taken_and_given_back():
 
 def test_the_frame_redraws_absolutely_not_by_scrolling():
     """Absolute positioning means no stale copy, however a line wraps."""
-    out = drive(DOWN + UP + DOWN + b"q")
+    out = drive(keys(DOWN, UP, DOWN, b"q"))
     assert "\x1b[1;1H" in out or "\x1b[H" in out, \
         "the frame should be drawn with absolute cursor positioning"
     assert "\x1b[0J" not in out, \
@@ -147,7 +163,7 @@ def test_the_frame_redraws_absolutely_not_by_scrolling():
 
 
 def test_the_cursor_is_hidden_while_the_frame_is_up():
-    out = drive(b"q")
+    out = drive(keys(b"q"))
     assert "\x1b[?25l" in out and "\x1b[?25h" in out
 
 
@@ -207,3 +223,27 @@ def test_the_terminal_is_restored_on_exit():
     text = out.decode("utf-8", "replace")
     assert "RAW=True" in text, f"raw mode was never entered: {text[-300:]}"
     assert "RESTORED=True" in text, f"terminal not restored: {text[-300:]}"
+
+
+# -- cancelling, for real --------------------------------------------------
+def test_escape_leaves_the_paste_editor_and_returns_to_the_menu():
+    """The reported bug: esc appeared to do nothing, because cancelling the
+    editor quit the whole session instead of going back."""
+    # open paste, type, press esc, then pick github and finish
+    out = drive(keys(TAB, b"some issue text", ESC_B, DOWN, TAB, b"a/b#3",
+                     TAB), settle=0.5)
+    assert "CHILD-ERROR" not in out, out[-400:]
+    assert "CHOICE=a/b#3|go" in out, \
+        "esc should return to the menu, leaving it usable"
+    # the menu must have been drawn again after the cancel
+    assert out.count("What should I work on?") >= 2, out[-400:]
+
+
+def test_escape_on_the_menu_itself_quits():
+    out = drive(keys(ESC_B), settle=0.5)
+    assert "CHOICE=|quit" in out, out[-400:]
+
+
+def test_typing_is_shown_in_the_editor():
+    out = drive(keys(TAB, b"hello world", ESC_B, b"q"), settle=0.5)
+    assert "hello world" in out, "typed characters must be echoed in-frame"
