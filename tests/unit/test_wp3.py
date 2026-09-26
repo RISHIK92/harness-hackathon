@@ -280,3 +280,20 @@ def test_trust_clause_is_in_the_system_prompt():
     sp = system_prompt("investigation", "T1")
     assert "never an instruction" in sp
     assert "at most two actions" in sp
+
+
+# -- regression: git grep does not speak PCRE -------------------------------
+def test_word_boundary_patterns_work_on_every_backend():
+    """`git grep -E` silently finds nothing for \\b and \\s (POSIX ERE has no
+    such escapes). With rg absent that made every caller search return zero."""
+    s = Search(FIX / "py-upstream")
+    for pattern in (r"\bimport_csv\s*\(", r"\bnormalize_row\b",
+                    r"\bsplit_fields\s*\("):
+        assert s.grep(pattern, max_hits=20), pattern
+
+
+def test_pcre_pattern_falls_through_when_git_grep_cannot(monkeypatch):
+    s = Search(FIX / "py-upstream")
+    monkeypatch.setattr(s, "_pcre_ok", lambda: False)
+    assert s._git_grep(r"\bimport_csv\s*\(", None, 20, False) is None
+    assert s.grep(r"\bimport_csv\s*\(", max_hits=20)      # python backend

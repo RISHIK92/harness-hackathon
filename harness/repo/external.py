@@ -151,12 +151,17 @@ def _probe_manifest_churn(repo: Path, ef: ExternalFactors, toolchain,
                           search) -> None:
     ef.checked.append("recent dependency-manifest changes (90 days)")
     changes = manifest_changes(repo)
+    # A manifest touched by the repository's first commit is not churn.
+    root = run("git rev-list --max-parents=0 HEAD", repo, timeout=15,
+               check_deny=False)
+    roots = {ln.strip()[:7] for ln in root.stdout.splitlines() if ln.strip()}
+    changes = [c for c in changes if c.sha[:7] not in roots]
     if changes:
         subjects = "; ".join(c.subject[:60] for c in changes[:3])
         ef.findings.append(Finding(
             "dependency",
             f"{len(changes)} manifest change(s) in the last 90 days: {subjects}",
-            "medium"))
+            "low"))
 
 
 def _probe_missing_config(repo: Path, ef: ExternalFactors, toolchain,

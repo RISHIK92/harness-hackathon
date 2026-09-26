@@ -26,8 +26,11 @@ def model_ids(items: list[dict]) -> list[str]:
 
 
 def context_window(item: dict) -> int | None:
-    val = item.get("context_window")
-    return val if isinstance(val, int) and val > 0 else None
+    for key in ("context_window", "context_length", "max_context_length"):
+        val = item.get(key)
+        if isinstance(val, int) and val > 0:
+            return val
+    return None
 
 
 def chat(base_url: str, api_key: str, model: str, messages: list[dict],

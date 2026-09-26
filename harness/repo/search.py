@@ -15,6 +15,10 @@ from pathlib import Path
 from ..verify.runner import run
 
 MAX_HITS = 80
+# Constructs POSIX ERE (what `git grep -E` speaks) does not support. git grep
+# silently finds nothing for these rather than erroring, so a pattern using
+# them must either go to `git grep -P` or fall through to the Python backend.
+PCRE_ONLY = re.compile(r"\\[bBdDsSwWAZzh]|\(\?[:=!<]|\{\d")
 SKIP_DIRS = {".git", ".harness", ".venv", "venv", "node_modules", "__pycache__",
              "dist", "build", ".tox", ".mypy_cache", ".pytest_cache", "target",
              ".worktrees", "vendor", ".idea", ".gradle"}
@@ -22,6 +26,17 @@ SKIP_SUFFIX = {".pyc", ".so", ".dylib", ".dll", ".png", ".jpg", ".jpeg", ".gif",
                ".pdf", ".zip", ".gz", ".tar", ".whl", ".ico", ".woff", ".woff2",
                ".lock", ".min.js", ".map", ".bin", ".class", ".jar"}
 MAX_FILE_BYTES = 1_000_000
+
+# Extensions that can contain a call site. Data and config files mention
+# identifiers too, and counting them as callers is a visible error.
+SOURCE_SUFFIX = {".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+                 ".go", ".rs", ".java", ".kt", ".rb", ".php", ".c", ".h",
+                 ".cpp", ".cc", ".hpp", ".cs", ".swift", ".scala", ".sh"}
+
+
+def is_source(path: str) -> bool:
+    from pathlib import Path as _P
+    return _P(path).suffix.lower() in SOURCE_SUFFIX
 
 
 @dataclass(frozen=True)
@@ -38,6 +53,7 @@ class Search:
     def __init__(self, repo: Path, log=None) -> None:
         self.repo = Path(repo)
         self.log = log
+        self._pcre: bool | None = None
         self.backend = ("rg" if shutil.which("rg") else
                         "git-grep" if (self.repo / ".git").exists() else
                         "python")
@@ -87,8 +103,22 @@ class Search:
                             d["lines"]["text"].rstrip("\n")))
         return hits
 
+    def _pcre_ok(self) -> bool:
+        if self._pcre is None:
+            r = run("git grep -P -n -I -- 'a' -- /dev/null", self.repo,
+                    timeout=10, check_deny=False)
+            self._pcre = "not built with PCRE" not in (r.stderr or "")
+        return self._pcre
+
     def _git_grep(self, pattern, globs, max_hits, fixed):
-        flag = "-F" if fixed else "-E"
+        if fixed:
+            flag = "-F"
+        elif PCRE_ONLY.search(pattern):
+            if not self._pcre_ok():
+                return None          # fall through to the Python backend
+            flag = "-P"
+        else:
+            flag = "-E"
         cmd = f"git grep -n -I {flag} -- {_shq(pattern)}"
         r = run(cmd, self.repo, timeout=30, check_deny=False)
         if r.exit_code not in (0, 1):
