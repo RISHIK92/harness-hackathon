@@ -19,7 +19,8 @@ from .localize.oracle import find as find_oracle
 from .localize.router import Signals, route as route_of
 from .logging_ui import Logger
 from .model import bootstrap as boot
-from .phases import p0_triage, p1_investigate, p2_scope, p3_implement
+from .phases import (p0_triage, p1_investigate, p2_scope, p3_implement,
+                     p4_verify)
 from .phases.ctx import PhaseContext
 from .records import RootCauseRecord
 from .repo import external as EXT
@@ -167,9 +168,18 @@ class Orchestrator:
                            {"files": [a.path for a in applied]})
         self._write("diff.patch", {"diff": self.workspace.diff()})
 
-        self.log.phase("P4")
-        self.log.line("verification lands in WP6")
-        return exits.NO_FIX
+        # -- P4 verify -----------------------------------------------------
+        self.events.append("phase_start", "P4", {})
+        verifier = p4_verify.Verifier(ctx, baseline)
+        changed = self.workspace.changed_files()
+        vres = verifier.run(plan, root_cause, changed, oracle, final=True)
+        self.events.append("phase_end", "P4", vres.to_json(),
+                           summary=vres.stage or "clean")
+        self._write("verification.json", vres.to_json())
+
+        self.log.phase("P5")
+        self.log.line("confidence scoring lands in WP7")
+        return exits.NO_FIX if vres.blocking else exits.PARTIAL
 
     # -- helpers -----------------------------------------------------------
     def _context(self) -> PhaseContext:

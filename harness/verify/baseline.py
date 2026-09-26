@@ -107,6 +107,9 @@ def capture(repo: Path, toolchain, cfg, log, work_dir: Path) -> Baseline:
     elif not cfg.no_coverage and toolchain.language == "python":
         log.degraded("no_coverage", "SBFL localization unavailable")
 
+    from .lint_gate import capture_baseline as lint_baseline
+    bl.lint = lint_baseline(repo, toolchain, log)
+
     counts = parsed.counts()
     log.line(f"baseline: {counts[P.PASS]} passed, "
              f"{counts[P.FAIL] + counts[P.ERROR]} failed, "

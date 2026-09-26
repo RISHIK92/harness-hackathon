@@ -141,3 +141,38 @@ def test_unappliable_edits_retry_then_revert(monkeypatch):
         assert (repo / "src" / "dateparse" / "parser.py").read_text() == original
     finally:
         _git(repo, "checkout", "--", ".")
+
+
+# -- WP6 gates, end to end --------------------------------------------------
+def test_verification_gate_order_and_judge(monkeypatch):
+    out, tests, diff, changed, meta = run_and_test("py-offbyone", monkeypatch)
+    order = [ln for ln in out.splitlines() if "[P4 VERIFY" in ln]
+    joined = "\n".join(order)
+    assert "lint: clean" in joined
+    assert "oracle" in joined and "PASS" in joined
+    assert "scoped tests" in joined
+    assert "full suite" in joined
+    assert "diff sanity: YES" in joined
+    assert "best practices" in joined
+    # lint must precede tests, tests must precede the judge
+    assert joined.index("lint") < joined.index("scoped tests")
+    assert joined.index("scoped tests") < joined.index("diff sanity")
+
+
+def test_full_suite_runs_once_not_per_cycle(monkeypatch):
+    out, tests, diff, changed, meta = run_and_test("py-none-guard", monkeypatch)
+    assert out.count("full suite (pre-submission gate)") == 1
+
+
+def test_fixed_transition_is_reported(monkeypatch):
+    """A previously-failing test now passing is hard evidence for C2."""
+    out, tests, diff, changed, meta = run_and_test("py-offbyone", monkeypatch)
+    assert "now passing" in out
+
+
+def test_lint_debt_fixture_does_not_block_the_run(monkeypatch):
+    """The whole point of scoping the lint gate."""
+    out, tests, diff, changed, meta = run_and_test("py-lint-debt", monkeypatch)
+    assert "lint: clean" in out or "no new diagnostics" in out
+    assert "applied:" in out
+    assert "failed" not in tests

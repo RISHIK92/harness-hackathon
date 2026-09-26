@@ -53,7 +53,9 @@ class Workspace:
             f = info / "exclude"
             body = f.read_text("utf-8") if f.is_file() else ""
             if ".harness/" not in body:
-                f.write_text(body.rstrip("\n") + "\n.harness/\n.worktrees/\n",
+                f.write_text(body.rstrip("\n")
+                             + "\n.harness/\n.worktrees/\n__pycache__/\n"
+                               "*.pyc\n.coverage\n",
                              encoding="utf-8")
             self._excluded = True
         except OSError:
@@ -66,13 +68,34 @@ class Workspace:
         return bool(self.git("status --porcelain").stdout.strip())
 
     def changed_files(self) -> list[str]:
+        """Files WE changed.
+
+        Running the suite leaves build artifacts (__pycache__, .coverage,
+        compiled output) behind. A repository without a .gitignore reports
+        them as untracked, and feeding a .pyc to the linter produces a
+        spurious block, so they are filtered here rather than everywhere
+        downstream.
+        """
+        from .search import SKIP_DIRS, SKIP_SUFFIX
         if not self.is_git:
             return []
         r = self.git("diff --name-only HEAD")
         files = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
         untracked = self.git("ls-files --others --exclude-standard")
-        files += [ln.strip() for ln in untracked.stdout.splitlines() if ln.strip()]
-        return sorted(set(f for f in files if not f.startswith(".harness")))
+        files += [ln.strip() for ln in untracked.stdout.splitlines()
+                  if ln.strip()]
+
+        out = []
+        for f in set(files):
+            path = Path(f)
+            if f.startswith((".harness", ".worktrees")):
+                continue
+            if any(part in SKIP_DIRS for part in path.parts):
+                continue
+            if path.suffix.lower() in SKIP_SUFFIX or f.endswith(".coverage"):
+                continue
+            out.append(f)
+        return sorted(out)
 
     def diff(self, stat: bool = False) -> str:
         if not self.is_git:

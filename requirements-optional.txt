@@ -1,4 +1,5 @@
-# Optional accelerators. Every one degrades cleanly (SPEC.md 15, 36).
-# An install failure here MUST NOT fail `make setup`.
+# Optional accelerators and dev tooling. Every one degrades cleanly
+# (SPEC.md 15, 36). An install failure here MUST NOT fail `make setup`.
 coverage==7.6.1
 pytest==8.3.3
+ruff==0.6.9

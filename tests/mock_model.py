@@ -181,6 +181,25 @@ def respond(body: dict, wire: str = "openai") -> dict:
             "fix_classification": "minimal_edit",
         }), wire=wire)
 
+    # P4 diff-sanity judge: name a real identifier from the diff, as the
+    # anti-sycophancy rule requires.
+    if "Does this diff address the stated root cause?" in prompt:
+        added = [ln[1:].strip() for ln in prompt.splitlines()
+                 if ln.startswith("+") and not ln.startswith("+++")]
+        ident = ""
+        for line in added:
+            m = re.search(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b", line)
+            if m:
+                ident = m.group(1)
+                break
+        return _reply(prompt,
+                      f"YES\nthe new {ident} check\nIt handles the reported "
+                      f"input before the failing operation runs.", wire=wire)
+
+    # P4 best-practices judge: flag only, never fix.
+    if "Answer PASS or FLAG" in prompt:
+        return _reply(prompt, "PASS", wire=wire)
+
     # P3 implementation
     if "OUTPUT FORMAT" in prompt:
         path = _first_path(prompt)
