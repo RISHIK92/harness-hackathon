@@ -83,22 +83,28 @@ class Verifier:
         # oracle: the single test the issue is about
         if oracle:
             res.oracle_passes = self._run_one(oracle.test_id)
-            c.log.line(f"oracle {oracle.test_id.split('::')[-1]}: "
-                       f"{'PASS' if res.oracle_passes else 'FAIL'}")
+            short = oracle.test_id.split("::")[-1]
+            verdict = "PASS" if res.oracle_passes else "FAIL"
+            (c.log.ok if res.oracle_passes else c.log.fail)(
+                "oracle", short, plain=f"oracle {short}: {verdict}")
 
         # G2 scoped tests
         symbols = [f.symbol for f in plan.files_to_change if f.symbol]
         scope = scope_tests.select(c.repo, changed, symbols, c.toolchain,
                                    c.search)
         if scope:
-            c.log.line(f"scoped tests ({scope.method}): {scope.selector[:70]}")
+            c.log.computed(
+                "scoped tests", f"{scope.selector[:56]}  ({scope.method})",
+                plain=f"scoped tests ({scope.method}): "
+                      f"{scope.selector[:70]}")
             res.scoped = self._run_and_classify(scope.selector)
             if res.scoped and res.scoped.blocking:
                 res.stage = "scoped"
                 self._report(res.scoped)
                 return res
         else:
-            c.log.line(f"scoped tests: {scope.method}")
+            c.log.computed("scoped tests", scope.method,
+                           plain=f"scoped tests: {scope.method}")
 
         # G3 full suite -- once, as the pre-submission gate
         if final or not scope:
@@ -106,7 +112,8 @@ class Verifier:
                 c.log.note("full_suite_cap",
                            f"already run {self.full_runs} times")
             else:
-                c.log.line("full suite (pre-submission gate)")
+                c.log.computed("full suite", "pre-submission gate",
+                           plain="full suite (pre-submission gate)")
                 res.full = self._run_and_classify("")
                 res.ran_full = True
                 self.full_runs += 1
@@ -118,14 +125,18 @@ class Verifier:
         # G4 diff sanity, cheapest model
         diff = c.workspace.diff()
         res.judge = diff_sanity(c, root_cause, plan, diff)
-        c.log.line(res.judge.render())
+        (c.log.ok if res.judge.addresses else c.log.fail)(
+            "diff sanity", res.judge.render().split(": ", 1)[-1],
+            plain=res.judge.render())
         if not res.judge.addresses and res.judge.conclusive:
             res.stage = "judge"
             return res
 
         # G5 best practices, flag only
         res.practices = best_practices(c, self._modified_functions(changed))
-        c.log.line(res.practices.render())
+        c.log.computed("best practices",
+                       res.practices.render().split(": ", 1)[-1],
+                       plain=res.practices.render())
         return res
 
     # -- helpers -----------------------------------------------------------
@@ -174,7 +185,11 @@ class Verifier:
             bits.append(f"{len(cls.fixed)} now passing")
         if cls.flaky:
             bits.append(f"{len(cls.flaky)} flaky")
-        c.log.line("tests: " + (", ".join(bits) or "no changes"))
+        kind = "bad" if cls.new else "ok"
+        body = ", ".join(bits) or "no changes"
+        c.log.step(kind, "tests", body,
+                   c.log.theme.bad if cls.new else c.log.theme.ok,
+                   plain=f"tests: {body}")
         for tid in cls.new[:4]:
             c.log.cont(f"NEW  {tid}")
         for tid in cls.pre_existing[:3]:

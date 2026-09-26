@@ -86,7 +86,8 @@ class Gateway:
         if cached is not None:
             self.calls += 1
             self.log.model_call(model, cached.tokens_in, cached.tokens_out,
-                                0.0, extra="[cached]")
+                                0.0, extra=label or "call",
+                                from_cache=True)
             return cached
 
         if self.events:

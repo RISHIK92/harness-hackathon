@@ -79,7 +79,7 @@ def capture(repo: Path, toolchain, cfg, log, work_dir: Path) -> Baseline:
         rc_path.write_text(COVERAGE_RC, encoding="utf-8")
         cmd = _instrument(cmd, rc_path, python)
 
-    log.line(f"baseline: {cmd}", phase="P0")
+    log.debug(f"baseline command: {cmd}")
     result = run(cmd, repo, timeout=BASELINE_CAP_S, check_deny=False,
                  env_extra={"COVERAGE_FILE": str(work_dir / ".coverage")})
     bl.duration_s = result.duration_s
@@ -111,10 +111,11 @@ def capture(repo: Path, toolchain, cfg, log, work_dir: Path) -> Baseline:
     bl.lint = lint_baseline(repo, toolchain, log)
 
     counts = parsed.counts()
-    log.line(f"baseline: {counts[P.PASS]} passed, "
-             f"{counts[P.FAIL] + counts[P.ERROR]} failed, "
-             f"{counts[P.SKIP]} skipped  ({bl.duration_s:.1f}s, mode={bl.mode})",
-             phase="P0")
+    body = (f"{counts[P.PASS]} passed, "
+            f"{counts[P.FAIL] + counts[P.ERROR]} failed, "
+            f"{counts[P.SKIP]} skipped  "
+            f"({bl.duration_s:.1f}s, mode={bl.mode})")
+    log.computed("baseline", body, plain=f"baseline: {body}")
     if bl.red:
         log.note("red_baseline",
                  f"{len(parsed.failing)} tests already failing - these will be "

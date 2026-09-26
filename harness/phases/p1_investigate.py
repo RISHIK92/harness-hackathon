@@ -74,7 +74,8 @@ class Investigation:
     def run(self, issue, baseline, sbfl, oracle, route, external) -> RootCauseRecord:
         c = self.ctx
         c.log.phase("P1")
-        c.log.line(f"{route.render()}")
+        c.log.computed("route", f"{route.name}   {route.reason}",
+                       plain=route.render())
 
         self._seed(issue, sbfl, external)
 
@@ -92,7 +93,8 @@ class Investigation:
             if len(needle) < 5:
                 continue
             hits = c.search.grep(re.escape(needle), max_hits=8)
-            c.log.line(f'grep "{needle[:44]}" -> {len(hits)} hits')
+            c.log.computed("grep", f'"{needle[:40]}" -> {len(hits)} hits',
+                           plain=f'grep "{needle[:44]}" -> {len(hits)} hits')
             if hits:
                 self.evidence.append(Evidence(
                     "grep", f"{needle[:60]} found at " +
@@ -109,8 +111,10 @@ class Investigation:
                     ", ".join(h.render() for h in hits[:3])))
 
         if external.checked:
-            c.log.line(f"probe: {len(external.checked)} external checks, "
-                       f"{len(external.findings)} finding(s)")
+            c.log.computed("probes", f"{len(external.checked)} external "
+                           f"checks, {len(external.findings)} finding(s)",
+                           plain=f"probe: {len(external.checked)} external "
+                                 f"checks, {len(external.findings)} finding(s)")
             for f in external.findings[:4]:
                 c.log.cont(f.render())
                 self.evidence.append(Evidence("probe", f.render()))
@@ -118,12 +122,17 @@ class Investigation:
         for path in self._suspect_files(issue, sbfl)[:3]:
             fh = H.file_history(c.repo, path)
             if fh.commits:
-                c.log.line(f"git log {path} -> {len(fh.commits)} commits"
-                           + ("  [recent]" if fh.recent else ""))
+                c.log.computed(
+                    "git log",
+                    f"{path} -> {len(fh.commits)} commits"
+                    + ("  [recent]" if fh.recent else ""),
+                    plain=f"git log {path} -> {len(fh.commits)} commits"
+                          + ("  [recent]" if fh.recent else ""))
                 self.evidence.append(Evidence("git", fh.render(3)))
 
         if sbfl.ok:
-            c.log.line("coverage localization:")
+            c.log.computed("coverage", "suspiciousness, from the baseline run",
+                           plain="coverage localization:")
             for s in sbfl.lines[:3]:
                 c.log.cont(s.render())
             self.evidence.append(Evidence(
@@ -173,7 +182,8 @@ class Investigation:
     def _from_oracle(self, issue, oracle, sbfl, route, external) -> RootCauseRecord:
         """A failing test is ground truth; hypothesis elimination is skipped."""
         c = self.ctx
-        c.log.line(f"oracle test: {oracle.test_id}")
+        c.log.ok("oracle", oracle.test_id,
+                 plain=f"oracle test: {oracle.test_id}")
         c.log.cont(oracle.reason)
         self.evidence.append(Evidence(
             "test", f"{oracle.test_id} fails on unmodified code ({oracle.reason})"))
@@ -183,14 +193,16 @@ class Investigation:
             callers = self.upstream(top.path, top.symbol.split(".")[-1]) \
                 if top.symbol else []
             if callers:
-                c.log.line("upstream: " + " <- ".join(callers[:3]))
+                c.log.computed("upstream", " <- ".join(callers[:3]),
+                               plain="upstream: " + " <- ".join(callers[:3]))
                 self.evidence.append(Evidence("read", "callers: "
                                               + "; ".join(callers[:5])))
         return self._synthesize(issue, sbfl, route, external, oracle=oracle)
 
     def _from_convergence(self, issue, sbfl, route, external) -> RootCauseRecord:
         c = self.ctx
-        c.log.line(f"signals converge on {route.winner}")
+        c.log.computed("converge", route.winner,
+                       plain=f"signals converge on {route.winner}")
         self.evidence.append(Evidence("sbfl", route.reason))
         return self._synthesize(issue, sbfl, route, external)
 
@@ -204,7 +216,10 @@ class Investigation:
                 if h.support != "untested":
                     continue
                 h.result, h.support = self._execute(h)
-                c.log.line(f"{h.id} {h.statement[:56]}")
+                verdict = {"confirmed": "ok", "refuted": "bad"}.get(
+                    h.support, "computed")
+                c.log.step(verdict, h.id, h.statement[:60],
+                           plain=f"{h.id} {h.statement[:56]}")
                 c.log.cont(f"check: {h.check.kind} {h.check.arg[:40]}"
                            f"  -> {h.support.upper()}")
                 self.evidence.append(Evidence(
@@ -434,5 +449,5 @@ def apply_gate(rec: RootCauseRecord, known_files: set[str], cfg, log) -> None:
         rec.confidence = "low"
     if rec.confidence == "low":
         cfg.conservative = True
-        log.line("confidence is low -> conservative mode: "
-                 "<=15 lines, 1 file, no signature changes")
+        log.note("conservative", "confidence is low: <=15 lines, 1 file, "
+                                  "no signature changes")

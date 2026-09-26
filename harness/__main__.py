@@ -53,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
         if cfg.log_level == "debug":
             traceback.print_exc()
         return exits.INTERNAL
+    finally:
+        log.close()
 
 
 if __name__ == "__main__":

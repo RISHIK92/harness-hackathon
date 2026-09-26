@@ -44,8 +44,20 @@ class Orchestrator:
         self.budgets = Budgets.from_config(cfg)
         self.bs = None
         self.caps = None
+        self.log.bind_counters(self._counters)
         self.toolchain = None
         self.startup_s = 0.0
+
+    def _counters(self) -> str:
+        """The trailing `· 14.2k tokens · 0:12` on the live status line."""
+        from .ui import human_time, human_tokens
+        t = self.budgets.tokens
+        bits = [human_time(self.budgets.clock.elapsed)]
+        if t.used:
+            bits.append(f"{human_tokens(t.used)} tokens")
+        if t.used_cached:
+            bits.append(f"{t.cache_ratio()*100:.0f}% cached")
+        return "   " + f" {self.log.g.DOT} ".join(bits)
 
     # -- bootstrap ---------------------------------------------------------
     def bring_up(self) -> None:
@@ -75,7 +87,9 @@ class Orchestrator:
     def run(self) -> int:
         self.events.append("phase_start", "P0",
                            {"issue_len": len(self.cfg.issue)})
+        self.log.working("starting up")
         self.bring_up()
+        self.cfg._primary = self.bs.primary
 
         from .model.probe import probe
         self.caps = probe(self.bs.gateway, self.bs.primary.id,
@@ -95,16 +109,24 @@ class Orchestrator:
         eff_type, conservative = p0_triage.effective_type(issue.task_type)
         if conservative:
             self.cfg.conservative = True
-        self.log.line(f"task type {issue.task_type}"
-                      + (f" -> {eff_type} (conservative)" if conservative else ""))
-        self.log.line(f"vagueness {issue.vagueness} -> "
-                      f"{issue.min_hypotheses} hypotheses minimum")
+        self.log.computed(
+            "task type",
+            issue.task_type
+            + (f" -> {eff_type} (conservative)" if conservative else ""),
+            plain=f"task type {issue.task_type}"
+                  + (f" -> {eff_type} (conservative)" if conservative else ""))
+        self.log.computed(
+            "vagueness", f"{issue.vagueness}  -> {issue.min_hypotheses} "
+                         f"hypotheses minimum",
+            plain=f"vagueness {issue.vagueness} -> "
+                  f"{issue.min_hypotheses} hypotheses minimum")
         self.log.cont(issue.anchors.render())
         self.events.append("phase_end", "P0", issue.to_json(),
                            summary=issue.title[:80])
         self._write("issue.json", issue.to_json())
 
         # -- baseline + localization (all deterministic) -------------------
+        self.log.working("running the suite to establish a baseline")
         baseline = capture(self.cfg.repo_path, self.toolchain, self.cfg,
                            self.log, self.run_dir)
         self._write("baseline.json", baseline.to_json())
@@ -126,11 +148,13 @@ class Orchestrator:
 
         # -- P1 investigate ------------------------------------------------
         self.events.append("phase_start", "P1", {"route": route.name})
+        self.log.working("investigating")
         inv = p1_investigate.Investigation(ctx)
         root_cause: RootCauseRecord = inv.run(issue, baseline, sbfl, oracle,
                                               route, ctx.external)
         p1_investigate.apply_gate(root_cause, files, self.cfg, self.log)
-        self.log.line(f"root cause: {root_cause.statement}")
+        self.log.ok("root cause", root_cause.statement,
+                    plain=f"root cause: {root_cause.statement}")
         self.log.cont(f"class={root_cause.classification}  "
                       f"confidence={root_cause.confidence}  "
                       f"files={', '.join(f.path for f in root_cause.files[:2])}")
@@ -165,11 +189,14 @@ class Orchestrator:
         for cycle in range(1, self.cfg.max_cycles + 1):
             summary.cycles = cycle
             self.log.raw("")
-            self.log.line(f"cycle {cycle} of {self.cfg.max_cycles}",
-                          phase="P3")
+            self.log.phase("P3", f"cycle {cycle} of {self.cfg.max_cycles}")
+            if not self.log.rich:
+                self.log.line(f"cycle {cycle} of {self.cfg.max_cycles}",
+                              phase="P3")
 
             # P3
             try:
+                self.log.working(f"implementing (cycle {cycle})")
                 applied, flags = impl.run(issue, root_cause, plan, feedback)
             except EditFailure as exc:
                 fail = taxonomy.classify_edit_failure(exc)
@@ -193,6 +220,7 @@ class Orchestrator:
 
             # P4
             try:
+                self.log.working("verifying")
                 vres = verifier.run(plan, root_cause, changed, oracle,
                                     final=True)
             except BudgetExceeded:
@@ -204,11 +232,19 @@ class Orchestrator:
             self.log.phase("P5")
             conf = p5_confidence.score(root_cause, plan, vres,
                                        self.workspace, self.cfg)
-            self.log.line(conf.render())
+            self.log.step("ok" if conf.score == 6 else "warn",
+                          "confidence", conf.render(),
+                          self.log.theme.ok if conf.score == 6
+                          else self.log.theme.warn,
+                          plain=conf.render())
             action = p5_confidence.decide(conf, cycle, self.cfg.max_cycles)
-            self.log.line(f"decision: {action.value}"
-                          + (f"  (blocking: {', '.join(conf.blocking)})"
-                             if conf.blocking else ""))
+            self.log.step("ok" if action.value == "SUBMIT" else "warn",
+                          "decision", action.value
+                          + (f"   blocking: {', '.join(conf.blocking)}"
+                             if conf.blocking else ""),
+                          plain=f"decision: {action.value}"
+                                + (f"  (blocking: {', '.join(conf.blocking)})"
+                                   if conf.blocking else ""))
 
             attempts.append({
                 "cycle": cycle,
@@ -315,6 +351,7 @@ class Orchestrator:
             from . import publish
             publish.publish(self.cfg, self.log, self.cfg.github,
                             summary.exit_code, summary, text)
+        self.log.done_working()
         self.log.raw("")
         self.log.raw("=== DIFF ===")
         self.log.raw(self.workspace.diff() or "(no changes)")

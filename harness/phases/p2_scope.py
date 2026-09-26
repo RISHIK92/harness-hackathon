@@ -198,8 +198,12 @@ def harden(ctx, plan: ChangePlan, root_cause,
     if plan.callers_requiring_update:
         plan.interface_changes = plan.interface_changes or len(
             plan.callers_requiring_update) > 0
-        c.log.line(f"callers of {', '.join(symbols_changed[:2])}: "
-                   f"{len(plan.callers_requiring_update)} call site(s)")
+        c.log.computed(
+            "callers",
+            f"{', '.join(symbols_changed[:2])}: "
+            f"{len(plan.callers_requiring_update)} call site(s)",
+            plain=f"callers of {', '.join(symbols_changed[:2])}: "
+                  f"{len(plan.callers_requiring_update)} call site(s)")
         for site in plan.callers_requiring_update[:4]:
             c.log.cont(site)
 
@@ -223,8 +227,10 @@ def harden(ctx, plan: ChangePlan, root_cause,
     except RecordError as exc:
         c.log.warn(f"plan invalid after hardening: {exc}")
 
-    c.log.line(f"plan: {plan.kind}, {len(plan.files_to_change)} file(s), "
-               f"~{plan.estimated_lines_changed} lines")
+    c.log.computed("plan", f"{plan.kind}, {len(plan.files_to_change)} "
+                           f"file(s), ~{plan.estimated_lines_changed} lines",
+                   plain=f"plan: {plan.kind}, {len(plan.files_to_change)} "
+                         f"file(s), ~{plan.estimated_lines_changed} lines")
     c.log.cont(plan.fix_description[:200])
 
 

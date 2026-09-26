@@ -141,41 +141,74 @@ def build(cfg, log, summary, issue, root_cause, plan, verify, confidence,
 def render_stdout(log, cfg, summary, root_cause, plan, verify, confidence,
                   workspace, budgets) -> None:
     """The SPEC.md 11.3 block."""
+    from .ui import estimate_cost, human_time
     added, removed = workspace.diff_numstat()
     changed = workspace.changed_files()
     log.raw("")
-    log.rule("RESULT")
-    log.raw(f"status            {summary.status}")
+
+    if log.rich:
+        t = log.theme
+        colour = {"SUCCESS": t.ok, "PARTIAL": t.warn}.get(summary.status,
+                                                          t.bad)
+        mark = {"SUCCESS": log.g.OK, "PARTIAL": log.g.WARN}.get(
+            summary.status, log.g.BAD)
+        bar = ("\u2500" * 62) if log.unicode else ("-" * 62)
+        tl, tr = ("\u256d", "\u256e") if log.unicode else ("+", "+")
+        bl, br = ("\u2570", "\u256f") if log.unicode else ("+", "+")
+        v = "\u2502" if log.unicode else "|"
+        title = f"{t.paint(mark, colour)} {t.bold}{summary.status}{t.reset}"
+        pad = " " * max(1, 61 - len(summary.status) - 3)
+        log.raw(f"  {colour}{tl}{bar}{tr}{t.reset}")
+        log.raw(f"  {colour}{v}{t.reset} {title}{pad}{colour}{v}{t.reset}")
+        log.raw(f"  {colour}{bl}{bar}{br}{t.reset}")
+    else:
+        log.rule("RESULT")
+    W = 18
+    if not log.rich:
+        log.raw(f"status            {summary.status}")
     if summary.reason:
-        log.raw(f"reason            {summary.reason}")
-    log.raw(f"root cause        {root_cause.statement[:70]}")
-    log.raw(f"classification    {root_cause.classification:<16} "
-            f"confidence  {root_cause.confidence}")
-    log.raw(f"files changed     {', '.join(changed) or 'none'}  "
-            f"(+{added} -{removed})")
+        log.kv("reason", summary.reason, log.theme.dim, W)
+    log.kv("root cause", root_cause.statement[:70], log.theme.bold, W)
+    log.kv("classification",
+           f"{root_cause.classification:<16} confidence  "
+           f"{root_cause.confidence}", "", W)
+    log.kv("files changed",
+           f"{', '.join(changed) or 'none'}  (+{added} -{removed})", "", W)
 
     if verify:
         cls = verify.full or verify.scoped
         if cls:
-            log.raw(f"tests             {len(cls.fixed)} now passing - "
-                    f"{len(cls.blocking)} new failures - "
-                    f"{len(cls.pre_existing)} pre-existing (documented)")
+            log.kv("tests", f"{len(cls.fixed)} now passing - "
+                            f"{len(cls.blocking)} new failures - "
+                            f"{len(cls.pre_existing)} pre-existing "
+                            f"(documented)",
+                   log.theme.bad if cls.blocking else log.theme.ok, W)
             for tid in cls.pre_existing[:3]:
-                log.raw(f"pre-existing      {tid}")
+                log.kv("pre-existing", tid, log.theme.dim, W)
             for tid in cls.flaky[:2]:
-                log.raw(f"flaky             {tid}")
-        log.raw(f"lint              "
-                f"{verify.lint.render().splitlines()[0].replace('lint: ', '')}")
+                log.kv("flaky", tid, log.theme.dim, W)
+        log.kv("lint",
+               verify.lint.render().splitlines()[0].replace("lint: ", ""),
+               "", W)
     if confidence:
-        log.raw(f"confidence        {confidence.render()}")
-    t = budgets.tokens
-    log.raw(f"cycles used       {summary.cycles} of {cfg.max_cycles}"
-            f"        tokens {_k(t.used)}"
-            f"        wall {budgets.clock.elapsed:.0f}s")
-    if t.used_cached:
-        log.raw(f"prompt cache      {t.cache_ratio()*100:.0f}% of input tokens "
-                f"served from cache")
-    log.rule()
+        log.kv("confidence", confidence.render(),
+               log.theme.ok if confidence.score == 6 else log.theme.warn, W)
+    tb = budgets.tokens
+    log.kv("cycles used", f"{summary.cycles} of {cfg.max_cycles}"
+                          f"        tokens {_k(tb.used)}"
+                          f"        wall {budgets.clock.elapsed:.0f}s",
+           log.theme.dim, W)
+    if tb.used_cached:
+        log.kv("prompt cache",
+               f"{tb.cache_ratio()*100:.0f}% of input tokens served from "
+               f"cache", log.theme.dim, W)
+    model = getattr(getattr(cfg, "_primary", None), "id", "") or cfg.model or ""
+    cost = estimate_cost(model, tb.used_in, tb.used_out)
+    if cost is not None:
+        log.kv("estimated cost", f"${cost:.3f}  (list price, {model})",
+               log.theme.dim, W)
+    if not log.rich:
+        log.rule()
 
 
 def write(run_dir: Path, text: str) -> None:

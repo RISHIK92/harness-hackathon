@@ -88,43 +88,50 @@ TIER_BLURB = {
 def print_startup(bs: Bootstrap, cfg, log, repo_info: dict | None = None) -> None:
     """FR-11 / NFR-6: printed before any work begins."""
     repo_info = repo_info or {}
-    log.rule("HARNESS v2.1")
+    t = log.theme
+    log.banner("2.1")
+    log.legend()
+    log.raw("")
+
     src = ("AI_BASE_URL" if cfg.base_url else
            "HARNESS_PROVIDER" if cfg.provider else
            f"key prefix {_prefix(cfg.api_key)}")
-    log.raw(f"provider        {bs.provider.name}  (from {src})")
-    log.raw(f"base url        {bs.provider.base_url}")
+    log.kv("provider", f"{bs.provider.name}  (from {src})", t.bold)
+    log.kv("base url", bs.provider.base_url, t.dim)
 
     if bs.discovery.ok:
-        log.raw(f"models found    {len(bs.discovery.ids)} chat-capable "
-                f"of {bs.discovery.raw_count} listed")
+        log.kv("models found", f"{len(bs.discovery.ids)} chat-capable "
+                               f"of {bs.discovery.raw_count} listed")
         shown = ", ".join(bs.discovery.ids[:6])
         if len(bs.discovery.ids) > 6:
             shown += f", +{len(bs.discovery.ids)-6} more"
         if shown:
-            log.raw(f"                {shown}")
+            log.kv("", shown, t.dim)
     else:
-        log.raw("models found    none (discovery failed) - using overrides")
+        log.kv("models found", "none (discovery failed) - using overrides",
+               t.warn)
 
-    log.raw(f"primary model   {bs.primary.id}    tier {bs.primary.tier}   "
-            f"ctx {bs.primary.ctx}")
-    log.raw(f"cheap model     {bs.cheap.id}    tier {bs.cheap.tier}")
-    log.raw(f"tier profile    {bs.primary.tier}: "
-            f"{TIER_BLURB.get(bs.primary.tier, '')}")
+    log.kv("primary model", f"{bs.primary.id}    tier {bs.primary.tier}   "
+                            f"ctx {bs.primary.ctx}", t.bold)
+    log.kv("cheap model", f"{bs.cheap.id}    tier {bs.cheap.tier}", t.dim)
+    log.kv("tier profile", f"{bs.primary.tier}: "
+                           f"{TIER_BLURB.get(bs.primary.tier, '')}", t.accent)
 
     if repo_info:
-        log.raw(f"repository      {repo_info.get('path','')}   "
-                f"language {repo_info.get('language','unknown')}")
+        log.kv("repository", f"{repo_info.get('path','')}   "
+                             f"language {repo_info.get('language','unknown')}")
         if repo_info.get("test_cmd"):
-            log.raw(f"test command    {repo_info['test_cmd']}")
+            log.kv("test command", repo_info["test_cmd"], t.dim)
         if repo_info.get("lint_cmd"):
-            log.raw(f"lint command    {repo_info['lint_cmd']}")
+            log.kv("lint command", repo_info["lint_cmd"], t.dim)
 
-    log.raw(f"budgets         tokens {cfg.token_budget//1000}k - "
-            f"wall {cfg.time_budget//60}m - cycles {cfg.max_cycles}")
+    log.kv("budgets", f"tokens {cfg.token_budget//1000}k - "
+                      f"wall {cfg.time_budget//60}m - "
+                      f"cycles {cfg.max_cycles}", t.dim)
     for tag in bs.degraded:
-        log.raw(f"degraded        {tag}")
-    log.rule()
+        log.kv("degraded", tag, t.warn)
+    if not log.rich:
+        log.rule()
 
 
 def _prefix(key: str) -> str:

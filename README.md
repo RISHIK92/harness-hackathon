@@ -74,6 +74,25 @@ issue text
    └─ P5  confidence    six conditions; any failure loops back, never submits
 ```
 
+### Reading the output
+
+Every line carries a glyph saying where the claim came from:
+
+```
+  ◆ baseline      3 passed, 1 failed        ← a program measured this
+  ◇ p1_synthesis  opus  8.2k→640  4.1s      ← a model said this
+  ✓ oracle        test_parse_date_…  PASS
+  ! degraded      no_coverage
+```
+
+That is the point of the whole design: most of what the harness concludes is
+measured rather than asked, and the gutter is where you can see that at a
+glance. Count the diamonds.
+
+Colour, glyphs and the live status line appear on a terminal. Piped output is
+plain text with the same facts, so a captured log stays readable and
+diffable. `HARNESS_UI=plain` forces it; `NO_COLOR` is honoured.
+
 Key properties:
 
 - **No code before the root cause.** Phase 1 is handed no write tool at all.
@@ -111,6 +130,7 @@ Only `AI_API_KEY` is required. Everything else has a sensible default.
 | `HARNESS_DRY_RUN` | 0 | run P0–P2 and print the plan, writing nothing |
 | `HARNESS_NO_CACHE` | 0 | disable the model-call cache |
 | `HARNESS_LOG_LEVEL` | info | `info` or `debug` |
+| `HARNESS_UI` | auto | `rich` or `plain`; auto-detects a TTY. `NO_COLOR` is honoured |
 
 The provider is detected from the key prefix with no API call. Anthropic,
 OpenAI, OpenRouter, Groq, xAI, Cerebras, Google, Together, Fireworks,

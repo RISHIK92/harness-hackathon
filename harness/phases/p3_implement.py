@@ -64,8 +64,8 @@ class Implementation:
     def run(self, issue, root_cause, plan, feedback: str = "") -> tuple:
         """Returns (applied, flags). Raises EditFailure when unrecoverable."""
         c = self.ctx
-        c.log.phase("P3")
-
+        # The phase header is emitted by the orchestrator, which knows the
+        # cycle number.
         if not plan.files_to_change:
             raise EditFailure(
                 "scope", "the plan names no file to change; nothing to "
@@ -85,8 +85,9 @@ class Implementation:
                    else F.SEARCH_REPLACE)
         messages = self._messages(issue, root_cause, plan, target, fmt, span,
                                   feedback)
-        c.log.line(f"format {fmt}  target {path}"
-                   + (f":{span[0]}-{span[1]}" if span[1] else ""))
+        where = path + (f":{span[0]}-{span[1]}" if span[1] else "")
+        c.log.computed("format", f"{fmt}  {where}",
+                       plain=f"format {fmt}  target {where}")
 
         reply = c.router.call("p3_implement", messages, "P3",
                               max_tokens=3000, cache_prefix=1)
@@ -116,10 +117,13 @@ class Implementation:
 
         added = sum(a.added for a in applied)
         removed = sum(a.removed for a in applied)
-        c.log.line(f"applied: +{added} -{removed} across "
-                   f"{len(applied)} file(s)")
+        c.log.ok("applied", f"+{added} -{removed} across "
+                            f"{len(applied)} file(s)",
+                 plain=f"applied: +{added} -{removed} across "
+                       f"{len(applied)} file(s)")
         if flags:
-            c.log.line("hygiene flags: " + ", ".join(flags))
+            c.log.step("warn", "hygiene", ", ".join(flags), c.log.theme.warn,
+                       plain="hygiene flags: " + ", ".join(flags))
         c.events.append("edit_applied", "P3",
                         {"files": [a.path for a in applied],
                          "added": added, "removed": removed, "flags": flags,

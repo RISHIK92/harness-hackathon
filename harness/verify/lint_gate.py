@@ -120,7 +120,9 @@ def gate(repo: Path, toolchain, changed: list, baseline_lint: set,
     new = sorted(current - baseline_lint)
     pre = sorted(current & baseline_lint)
     result = LintResult(new=new, pre_existing=pre, ran=True)
-    log.line(result.render().splitlines()[0])
+    head = result.render().splitlines()[0].replace("lint: ", "", 1)
+    (log.fail if result.blocks else log.computed)(
+        "lint", head, plain=result.render().splitlines()[0])
     for d in new[:5]:
         log.cont(d)
     return result
