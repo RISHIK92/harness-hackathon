@@ -49,7 +49,7 @@ def keys(*items) -> list:
     return out
 
 
-def drive(script, settle: float = 0.45) -> str:
+def drive(script, settle: float = 0.45, scenario: str = "select") -> str:
     """Run the console in a child attached to a pty; return what it wrote."""
     pid, fd = pty.fork()
     if pid == 0:                                   # child
@@ -66,13 +66,18 @@ def drive(script, settle: float = 0.45) -> str:
             ui = Console.Console(log=log, cfg=cfg)
             owned = ui.take_terminal()          # the path production uses
             try:
-                choice = ui.select_task()
+                if scenario == "after":
+                    report = ROOT / "README.md"
+                    result = ui.after_run(0, cfg, report, None)
+                    tail = f"AFTER={result}"
+                else:
+                    choice = ui.select_task()
+                    tail = (f"CHOICE={choice.github_ref or ''}|"
+                            f"{'quit' if choice.quit else 'go'}")
             finally:
                 ui.source.close()
                 ui.release_terminal()
-            sys.stdout.write(f"\nOWNED={owned} "
-                             f"CHOICE={choice.github_ref or ''}|"
-                             f"{'quit' if choice.quit else 'go'}\n")
+            sys.stdout.write(f"\nOWNED={owned} {tail}\n")
             sys.stdout.flush()
         except BaseException as exc:               # pragma: no cover
             try:
@@ -247,3 +252,39 @@ def test_escape_on_the_menu_itself_quits():
 def test_typing_is_shown_in_the_editor():
     out = drive(keys(TAB, b"hello world", ESC_B, b"q"), settle=0.5)
     assert "hello world" in out, "typed characters must be echoed in-frame"
+
+
+# -- the after-run menu ----------------------------------------------------
+def test_choosing_an_action_does_not_look_like_the_list_moving():
+    """Reported as 'tab and enter move up and down instead of selecting'.
+
+    Two causes: the diff was written straight to the stream, landing at
+    whatever cursor position the frame was at, and the menu then restarted
+    at the first item.
+    """
+    out = drive(keys(TAB, ESC_B, b"q"), settle=0.5, scenario="after")
+    assert "CHILD-ERROR" not in out, out[-400:]
+    assert "AFTER=quit" in out, out[-400:]
+    # tab opened the diff pager, in the frame
+    assert "esc back" in out, "tab should open a pager, not dump to the stream"
+
+
+def test_the_cursor_stays_where_it_was_after_an_action():
+    """Come back from the diff and the highlight must still be on it."""
+    out = drive(keys(TAB, ESC_B, TAB, ESC_B, b"q"), settle=0.5,
+                scenario="after")
+    assert "CHILD-ERROR" not in out, out[-400:]
+    assert out.count("esc back") >= 2, \
+        "the second tab should have reopened the same item"
+
+
+def test_no_post_item_without_a_github_reference():
+    out = drive(keys(b"q"), settle=0.5, scenario="after")
+    assert "post the report to None" not in out
+    assert "post the report" not in out
+
+
+def test_run_another_is_reachable():
+    # items: diff, report(README exists so enabled), run another, quit
+    out = drive(keys(DOWN, DOWN, TAB), settle=0.5, scenario="after")
+    assert "AFTER=again" in out, out[-400:]

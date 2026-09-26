@@ -132,15 +132,20 @@ class Console:
             return
         self._erase()
 
-    def menu(self, title: str, items: list, hint: str = "") -> int | None:
-        """Render a menu and return the chosen index, or None to go back."""
+    def menu(self, title: str, items: list, hint: str = "",
+             start: int = 0) -> int | None:
+        """Render a menu and return the chosen index, or None to go back.
+
+        `start` keeps the cursor where it was: returning from an action to a
+        menu that has jumped back to the top reads as the list having moved
+        by itself.
+        """
         t = self.log.theme
         self.source.enter_raw()      # ask_line() drops out of raw mode
-        selected = 0
         enabled = [i for i, it in enumerate(items) if it.enabled]
         if not enabled:
             return None
-        selected = enabled[0]
+        selected = start if start in enabled else enabled[0]
 
         while True:
             lines = ["", f"    {t.bold}{title}{t.reset}", ""]
@@ -168,12 +173,10 @@ class Console:
                 here = enabled.index(selected)
                 selected = enabled[(here + 1) % len(enabled)]
             elif key in (K.TAB, K.ENTER):
-                self._undraw()
                 return selected
             elif key.isdigit() and 1 <= int(key) <= len(items):
                 idx = int(key) - 1
                 if items[idx].enabled:
-                    self._undraw()
                     return idx
 
     # -- input -------------------------------------------------------------
@@ -411,29 +414,42 @@ class Console:
     def after_run(self, exit_code: int, cfg, report_path: Path,
                   github_ref=None) -> str:
         """Returns 'again' or 'quit'."""
+        actions = ["diff", "report"]
         items = [
             Item("show the diff", "git diff in the target repository"),
             Item("open the full report", str(report_path),
                  enabled=report_path.is_file()),
-            Item(f"post the report to {github_ref}", "adds a comment",
-                 enabled=bool(github_ref) and exit_code in (0, 2)),
-            Item("run another", ""),
-            Item("quit", ""),
         ]
+        # Only offer to comment when there is somewhere to comment on: an
+        # item reading "post the report to None" is noise.
+        if github_ref is not None:
+            items.append(Item(f"post the report to {github_ref}",
+                              "adds a comment",
+                              enabled=exit_code in (0, 2)))
+            actions.append("post")
+        items += [Item("run another", ""), Item("quit", "")]
+        actions += ["again", "quit"]
+
+        at = 0
         while True:
             picked = self.menu("What next?", items,
-                               "↑↓ move   tab choose   q quit")
-            if picked is None or picked == 4:
+                               "↑↓ move   tab choose   q quit", start=at)
+            if picked is None:
                 return "quit"
-            if picked == 0:
-                self._show_diff(cfg)
-            elif picked == 1:
-                self._show_file(report_path)
-            elif picked == 2:
-                self._post(github_ref, report_path, exit_code, cfg)
-                items[2].enabled = False
-            elif picked == 3:
+            at = picked
+            action = actions[picked]
+            if action == "quit":
+                return "quit"
+            if action == "again":
                 return "again"
+            if action == "diff":
+                self._show_diff(cfg)
+            elif action == "report":
+                self._show_file(report_path)
+            elif action == "post":
+                self._post(github_ref, report_path, exit_code, cfg)
+                items[picked].enabled = False
+                at = 0
 
     # -- helpers -----------------------------------------------------------
     def _header(self, bootstrap) -> None:
@@ -447,24 +463,60 @@ class Console:
 
     def _note(self, message: str) -> None:
         t = self.log.theme
-        self._w(f"  {t.paint(self.log.g.WARN, t.warn)} {t.warn}{message}"
-                f"{t.reset}")
+        line = f"  {t.paint(self.log.g.WARN, t.warn)} {t.warn}{message}{t.reset}"
+        if self.full:
+            self.screen.append(line)
+            self.screen.render()
+            return
+        self._w(line)
         self._flush()
+
+    def _page(self, title: str, text: str) -> None:
+        """Show long text inside the frame, scrollable.
+
+        Writing it straight to the stream would land at whatever cursor
+        position the frame happens to be at and be overwritten by the next
+        redraw -- which looks like the menu moving on its own.
+        """
+        t = self.log.theme
+        lines = (text or "(empty)").splitlines() or ["(empty)"]
+        if not self.full:
+            self._erase()
+            for line in lines[:400]:
+                self._w(line)
+            self._flush()
+            return
+
+        rows = max(6, self.screen._rows - len(self.screen.header) - 6)
+        top = 0
+        while True:
+            window = lines[top:top + rows]
+            panel = ["", f"    {t.bold}{title}{t.reset}", ""]
+            panel += [f"  {line}" for line in window]
+            panel += ["", f"    {t.dim}↑↓ scroll   "
+                          f"{top + 1}-{min(top + rows, len(lines))} "
+                          f"of {len(lines)}   esc back{t.reset}"]
+            self._draw(panel)
+            key = self.source.read()
+            if key in (K.ESC, "q", K.ENTER, K.TAB, K.CTRL_C):
+                self._undraw()
+                return
+            if key == K.DOWN:
+                top = min(max(0, len(lines) - rows), top + 1)
+            elif key == K.UP:
+                top = max(0, top - 1)
 
     def _show_diff(self, cfg) -> None:
         from .verify.runner import run
         result = run("git diff", cfg.repo_path, timeout=30, check_deny=False)
-        self._w()
-        self._w(result.stdout[:20000] or "  (no changes)")
-        self._flush()
+        self._page("Diff", result.stdout[:40000] or "  (no changes)")
 
     def _show_file(self, path: Path) -> None:
         try:
-            self._w()
-            self._w(path.read_text("utf-8", errors="replace")[:20000])
+            self._page(path.name, path.read_text("utf-8", errors="replace")
+                       [:40000])
         except OSError as exc:
             self._note(f"could not read {path}: {exc}")
-        self._flush()
 
     def _post(self, ref, report_path: Path, exit_code: int, cfg) -> None:
         from . import publish
