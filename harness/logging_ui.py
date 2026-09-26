@@ -77,6 +77,10 @@ class Logger:
             self._write("─" * width)
 
     # -- phase logging -----------------------------------------------------
+    def set_phase(self, phase: str) -> None:
+        """Set the prefix without emitting a banner."""
+        self._phase = phase
+
     def phase(self, phase: str) -> None:
         self._phase = phase
         name = PHASE_NAMES.get(phase, phase)
