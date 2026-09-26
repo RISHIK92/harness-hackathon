@@ -298,3 +298,21 @@ def test_collection_error_blocks_even_with_no_failures():
     cur = P.TestResults(tests={}, collection_error=True)
     c = CL.classify({}, cur)
     assert not c.clean
+
+
+def test_checkpoint_leaves_the_change_unstaged():
+    """A staged change makes `git diff` print nothing for the evaluator."""
+    from harness.verify.runner import run as _run
+    ws = Workspace(FIX / "py-offbyone")
+    target = ws.path / "src" / "dateparse" / "parser.py"
+    original = target.read_text()
+    try:
+        target.write_text(original + "\n# scribble\n")
+        ws.checkpoint("t")
+        plain = _run("git diff --name-only", ws.path, check_deny=False)
+        assert "parser.py" in plain.stdout, "the change must be visible to git diff"
+        staged = _run("git diff --cached --name-only", ws.path,
+                      check_deny=False)
+        assert not staged.stdout.strip(), "nothing should be left staged"
+    finally:
+        ws.revert_all()

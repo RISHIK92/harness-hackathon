@@ -66,6 +66,10 @@ class Implementation:
         c = self.ctx
         c.log.phase("P3")
 
+        if not plan.files_to_change:
+            raise EditFailure(
+                "scope", "the plan names no file to change; nothing to "
+                         "implement", path="")
         target = plan.files_to_change[0]
         path = target.path
         full = c.repo / path

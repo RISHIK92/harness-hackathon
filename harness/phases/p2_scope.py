@@ -65,7 +65,7 @@ def callers_of(ctx, symbol: str, defining_file: str) -> list[str]:
     return sites[:20]
 
 
-def scope(ctx, issue, root_cause) -> ChangePlan:
+def scope(ctx, issue, root_cause, candidates=None) -> ChangePlan:
     c = ctx
     c.log.phase("P2")
 
@@ -102,7 +102,7 @@ def scope(ctx, issue, root_cause) -> ChangePlan:
         data = {}
 
     plan = _plan_from(data, root_cause, suspects)
-    harden(ctx, plan, root_cause)
+    harden(ctx, plan, root_cause, candidates or [])
     return plan
 
 
@@ -137,7 +137,8 @@ def _int(value, default: int) -> int:
         return default
 
 
-def harden(ctx, plan: ChangePlan, root_cause) -> None:
+def harden(ctx, plan: ChangePlan, root_cause,
+           candidates: list | None = None) -> None:
     """Everything below is code, because a forgotten caller breaks the build."""
     c = ctx
     known = set(c.search.files())
@@ -176,6 +177,12 @@ def harden(ctx, plan: ChangePlan, root_cause) -> None:
         plan.files_to_change = [
             FileIntent(f.path) for f in root_cause.files
             if f.path in known and not NEVER_TOUCH.search(f.path)][:1]
+    if not plan.files_to_change:
+        # Last resort: the harness's own ranked candidates. Proceeding with
+        # no target at all would crash the implementer.
+        plan.files_to_change = [
+            FileIntent(p) for p in (candidates or [])
+            if p in known and not NEVER_TOUCH.search(p)][:1]
     if not plan.files_to_change:
         c.log.warn("no source file to change after hardening")
         return

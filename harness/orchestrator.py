@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from . import exits
-from .budget import Budgets
+from .budget import BudgetExceeded, Budgets
 from .context.assemble import Assembler
 from .context.events import EventLog
 from .edit.apply import EditFailure
@@ -20,7 +20,10 @@ from .localize.router import Signals, route as route_of
 from .logging_ui import Logger
 from .model import bootstrap as boot
 from .phases import (p0_triage, p1_investigate, p2_scope, p3_implement,
-                     p4_verify)
+                     p4_verify, p5_confidence)
+from .phases.p5_confidence import REMEDY_PHASE, Action
+from .recovery import alternatives, stuck, taxonomy
+from . import report as REPORT
 from .phases.ctx import PhaseContext
 from .records import RootCauseRecord
 from .repo import external as EXT
@@ -136,7 +139,7 @@ class Orchestrator:
 
         # -- P2 scope ------------------------------------------------------
         self.events.append("phase_start", "P2", {})
-        plan = p2_scope.scope(ctx, issue, root_cause)
+        plan = p2_scope.scope(ctx, issue, root_cause, route.candidates)
         self.events.append("phase_end", "P2", plan.to_json(),
                            summary=plan.fix_description[:80])
         self._write("scope.json", plan.to_json())
@@ -146,40 +149,203 @@ class Orchestrator:
             self.log.raw("dry run: P0-P2 only, nothing was written")
             return exits.NO_FIX
 
-        # -- P3 implement --------------------------------------------------
-        self.events.append("phase_start", "P3", {})
+        # -- the fix-and-verify loop (FR-33) -------------------------------
+        verifier = p4_verify.Verifier(ctx, baseline)
         impl = p3_implement.Implementation(ctx)
+        watch = stuck.StuckState()
+        attempts: list[dict] = []
+        tried_hypotheses: set = set()
+        remedy_counts: dict = {}
         feedback = ""
-        applied = None
-        for attempt in range(3):
+        summary = REPORT.RunSummary()
+        vres = None
+        conf = None
+
+        for cycle in range(1, self.cfg.max_cycles + 1):
+            summary.cycles = cycle
+            self.log.raw("")
+            self.log.line(f"cycle {cycle} of {self.cfg.max_cycles}",
+                          phase="P3")
+
+            # P3
             try:
                 applied, flags = impl.run(issue, root_cause, plan, feedback)
-                break
             except EditFailure as exc:
-                self.log.warn(f"edit rejected: {exc}")
+                fail = taxonomy.classify_edit_failure(exc)
+                self.log.warn(f"{fail.render()}  -> {fail.first_move}")
                 self.events.append("degradation", "P3",
-                                   {"stage": exc.stage, "detail": exc.detail})
+                                   {"kind": fail.kind, "detail": fail.detail})
+                watch.failure(fail.render())
                 feedback = exc.feedback()
-        if applied is None:
-            self.log.warn("no appliable edit after 3 attempts")
+                self.workspace.revert_all()
+                if self._stuck(watch, "P3"):
+                    break
+                continue
+            except BudgetExceeded:
+                self.cfg.conservative = True
+                self.log.degraded("budget", "conservative mode; going to P5")
+                break
+
+            changed = self.workspace.changed_files()
+            watch.diff(self.workspace.diff())
+            watch.observe(changed)
+
+            # P4
+            try:
+                vres = verifier.run(plan, root_cause, changed, oracle,
+                                    final=True)
+            except BudgetExceeded:
+                self.cfg.conservative = True
+                self.log.degraded("budget", "verification cut short")
+                break
+
+            # P5
+            self.log.phase("P5")
+            conf = p5_confidence.score(root_cause, plan, vres,
+                                       self.workspace, self.cfg)
+            self.log.line(conf.render())
+            action = p5_confidence.decide(conf, cycle, self.cfg.max_cycles)
+            self.log.line(f"decision: {action.value}"
+                          + (f"  (blocking: {', '.join(conf.blocking)})"
+                             if conf.blocking else ""))
+
+            attempts.append({
+                "cycle": cycle,
+                "checkpoint": self.workspace.checkpoint(f"cycle-{cycle}"),
+                "new_failures": len(vres.blocking),
+                "judge_ok": bool(vres.judge.addresses),
+                "hygiene": len(flags),
+                "diff_lines": sum(a.added + a.removed for a in applied),
+                "confidence": conf,
+                "verify": vres,
+            })
+            self.events.append("checkpoint", "P5",
+                               {"cycle": cycle, "action": action.value,
+                                "confidence": conf.to_json()})
+
+            if action is Action.SUBMIT:
+                summary.status = "SUCCESS"
+                summary.exit_code = exits.SUCCESS
+                break
+
+            # -- remedy routing (FR-35): never a silent submission ----------
+            phase = REMEDY_PHASE.get(action, "P3")
+            key = (phase, action.value)
+            remedy_counts[key] = remedy_counts.get(key, 0) + 1
+            if remedy_counts[key] > 2:
+                phase = stuck.escalate(phase)
+                self.log.line(f"anti-thrash: escalating to {phase}")
+
+            failure = taxonomy.classify_tests(
+                vres.full or vres.scoped, lint_blocked=vres.lint.blocks)
+            watch.failure(failure.render())
+            feedback = self._feedback_for(action, conf, vres, failure)
+
+            if self._stuck(watch, phase):
+                break
+
             self.workspace.revert_all()
-            return exits.NO_FIX
-        self.events.append("phase_end", "P3",
-                           {"files": [a.path for a in applied]})
+
+            if phase == "P1":
+                nxt = alternatives.next_alternative(root_cause,
+                                                    tried_hypotheses)
+                if nxt:
+                    tried_hypotheses.add(nxt.id)
+                    self.log.line("recovery: re-entering P1 with the "
+                                  f"next alternative - {alternatives.describe(nxt)}")
+                    root_cause.statement = nxt.statement
+                    root_cause.confidence = "medium"
+                else:
+                    self.log.line("no untried alternative remains -> "
+                                  "conservative mode")
+                    self.cfg.conservative = True
+                plan = p2_scope.scope(ctx, issue, root_cause,
+                                      route.candidates)
+            elif phase == "P2":
+                plan.estimated_lines_changed = max(
+                    2, plan.estimated_lines_changed // 2)
+                self.log.line(f"re-scoped: estimate now "
+                              f"{plan.estimated_lines_changed} lines")
+
+        # -- exhausted: restore the best attempt (FR-33) -------------------
+        if summary.status != "SUCCESS":
+            best = self._best(attempts)
+            if best:
+                self.workspace.restore(best["checkpoint"])
+                conf = best["confidence"]
+                vres = best["verify"]
+                summary.cycles = best["cycle"]
+                if conf and all(getattr(conf, c) for c in conf.HARD):
+                    summary.status = "PARTIAL"
+                    summary.exit_code = exits.PARTIAL
+                    summary.reason = ("hard gates green, soft condition(s) "
+                                      "failed: " + ", ".join(conf.blocking))
+                else:
+                    summary.status = "PARTIAL"
+                    summary.exit_code = exits.PARTIAL
+                    summary.reason = ("best attempt restored; blocking: "
+                                      + ", ".join(conf.blocking if conf
+                                                  else ["unknown"]))
+                self.log.line(f"restored the best attempt (cycle "
+                              f"{best['cycle']}): {best['new_failures']} new "
+                              f"failure(s), {best['diff_lines']} lines",
+                              phase="P5")
+            else:
+                self.workspace.revert_all()
+                summary.status = "NO_FIX"
+                summary.exit_code = exits.NO_FIX
+                summary.reason = "no appliable, verifiable change was produced"
+
+        summary.attempts = len(attempts)
+        self._write("confidence.json", conf.to_json() if conf else {})
+        if vres:
+            self._write("verification.json", vres.to_json())
         self._write("diff.patch", {"diff": self.workspace.diff()})
 
-        # -- P4 verify -----------------------------------------------------
-        self.events.append("phase_start", "P4", {})
-        verifier = p4_verify.Verifier(ctx, baseline)
-        changed = self.workspace.changed_files()
-        vres = verifier.run(plan, root_cause, changed, oracle, final=True)
-        self.events.append("phase_end", "P4", vres.to_json(),
-                           summary=vres.stage or "clean")
-        self._write("verification.json", vres.to_json())
+        text = REPORT.build(self.cfg, self.log, summary, issue, root_cause,
+                            plan, vres, conf, self.workspace, self.budgets,
+                            route, ctx.notes)
+        REPORT.write(self.run_dir, text)
+        REPORT.render_stdout(self.log, self.cfg, summary, root_cause, plan,
+                             vres, conf, self.workspace, self.budgets)
+        self.log.raw("")
+        self.log.raw("=== DIFF ===")
+        self.log.raw(self.workspace.diff() or "(no changes)")
+        return summary.exit_code
 
-        self.log.phase("P5")
-        self.log.line("confidence scoring lands in WP7")
-        return exits.NO_FIX if vres.blocking else exits.PARTIAL
+    # -- loop helpers ------------------------------------------------------
+    def _stuck(self, watch, phase: str) -> bool:
+        label = watch.check()
+        if not label:
+            return False
+        watch.fire(label)
+        self.log.warn(f"stuck: {label}")
+        self.events.append("degradation", phase,
+                           {"kind": "stuck", "detail": label})
+        return len(watch.triggers) >= 2
+
+    def _feedback_for(self, action, conf, vres, failure) -> str:
+        if action is Action.REVERT_AND_REIMPLEMENT:
+            return ("The previous attempt modified files outside the plan. "
+                    "Change only the planned file.")
+        if action is Action.RESCOPE:
+            return ("The previous change was too large for its scope. "
+                    "Produce a smaller change.")
+        if action is Action.REIMPLEMENT_TARGETED:
+            detail = ", ".join(vres.blocking[:3]) if vres else failure.detail
+            return (f"The previous attempt broke: {detail}. "
+                    f"{failure.first_move}.")
+        return failure.detail or "The previous attempt did not resolve the issue."
+
+    @staticmethod
+    def _best(attempts: list) -> dict | None:
+        """(new_failures asc, judge desc, hygiene asc, diff asc)."""
+        if not attempts:
+            return None
+        return sorted(attempts, key=lambda a: (a["new_failures"],
+                                               0 if a["judge_ok"] else 1,
+                                               a["hygiene"],
+                                               a["diff_lines"]))[0]
 
     # -- helpers -----------------------------------------------------------
     def _context(self) -> PhaseContext:

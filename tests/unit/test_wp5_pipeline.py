@@ -136,8 +136,8 @@ def test_unappliable_edits_retry_then_revert(monkeypatch):
     cfg.work_dir = Path(tempfile.mkdtemp()) / ".harness"
     try:
         rc = Orchestrator(cfg, Logger(stream=buf)).run()
-        assert "edit rejected" in buf.getvalue()
-        assert "no appliable edit after 3 attempts" in buf.getvalue()
+        assert "PATCH_NOT_APPLIED" in buf.getvalue()
+        assert "NO_FIX" in buf.getvalue()
         assert (repo / "src" / "dateparse" / "parser.py").read_text() == original
     finally:
         _git(repo, "checkout", "--", ".")

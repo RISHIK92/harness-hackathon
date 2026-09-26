@@ -31,6 +31,10 @@ class Signals:
                  ("structural", self.structural),
                  ("historical", self.historical)) if lst}
 
+    def any_signal(self) -> bool:
+        return bool(self.sbfl or self.lexical or self.structural
+                    or self.historical)
+
     def merged(self, limit: int = 8) -> list:
         """Borda-style merge: rank across signals, best first."""
         score: dict[str, float] = {}

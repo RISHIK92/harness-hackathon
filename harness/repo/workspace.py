@@ -43,8 +43,15 @@ class Workspace:
         r = self.git("rev-parse HEAD")
         return r.stdout.strip() if r.ok else ""
 
+    EXCLUDES = (".harness/", ".worktrees/", "__pycache__/", "*.pyc",
+                ".coverage", ".pytest_cache/")
+
     def exclude_harness_dir(self) -> None:
-        """.harness goes in .git/info/exclude, never the repo's .gitignore."""
+        """Our artifacts go in .git/info/exclude, never the repo's .gitignore.
+
+        Each pattern is checked individually: an exclude file written by an
+        earlier run must still pick up patterns added since.
+        """
         if not self.is_git or self._excluded:
             return
         info = self.path / ".git" / "info"
@@ -52,11 +59,11 @@ class Workspace:
             info.mkdir(parents=True, exist_ok=True)
             f = info / "exclude"
             body = f.read_text("utf-8") if f.is_file() else ""
-            if ".harness/" not in body:
-                f.write_text(body.rstrip("\n")
-                             + "\n.harness/\n.worktrees/\n__pycache__/\n"
-                               "*.pyc\n.coverage\n",
-                             encoding="utf-8")
+            present = {ln.strip() for ln in body.splitlines()}
+            missing = [p for p in self.EXCLUDES if p not in present]
+            if missing:
+                f.write_text(body.rstrip("\n") + "\n" + "\n".join(missing)
+                             + "\n", encoding="utf-8")
             self._excluded = True
         except OSError:
             pass
@@ -122,9 +129,13 @@ class Workspace:
     def checkpoint(self, label: str) -> Checkpoint:
         self.exclude_harness_dir()
         if self.is_git:
-            self.git("add -A")
+            # `git stash create` needs the change in the index, but leaving it
+            # staged means a plain `git diff` shows nothing -- an evaluator
+            # would see an empty diff. Stage, snapshot, then unstage.
+            self.git("add -A")     # honours .git/info/exclude
             r = self.git("stash create")
             ref = r.stdout.strip()
+            self.git("reset -q")
             if not ref:
                 ref = self.head()
             return Checkpoint(ref=ref, label=label, is_git=True)

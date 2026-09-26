@@ -385,6 +385,15 @@ class Investigation:
             top = sbfl.lines[0]
             rec.files.append(AffectedFile(top.path, (top.line, top.line),
                                           "highest coverage suspiciousness"))
+        if not rec.files:
+            # Never proceed with a path the model invented: fall back to the
+            # best ranked candidate the harness itself produced.
+            for cand in (route.candidates or []):
+                if cand in known and not is_test_path(cand):
+                    rec.files.append(AffectedFile(
+                        cand, (0, 0), "top-ranked localization candidate"))
+                    rec.confidence = "low"
+                    break
         if not rec.statement and sbfl.ok and sbfl.lines:
             rec.statement = (f"The failure originates at "
                              f"{sbfl.lines[0].path}:{sbfl.lines[0].line}")
