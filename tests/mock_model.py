@@ -74,6 +74,50 @@ def _symbol(prompt: str) -> str:
     return "target"
 
 
+# Correct fixes keyed by a distinctive substring of the code the harness shows
+# the model. This simulates "the model produces a good patch" so the harness
+# plumbing can be verified end to end.
+FIXES = [
+    ('parts = text.split("-")',
+     '    parts = text.split("-")\n    if len(parts) != 3:\n'
+     '        raise ValueError("expected YYYY-MM-DD, got %r" % text)',
+     '    parts = text.split("-")'),
+    ('return profile["name"].title()',
+     '    profile = load_profile(store, user_id)\n    if profile is None:\n'
+     '        return ""\n    return profile["name"].title()',
+     '    profile = load_profile(store, user_id)\n'
+     '    return profile["name"].title()'),
+    ('name, qty = normalize_row(line)',
+     '    for line in lines:\n        if not line.strip():\n'
+     '            continue\n        name, qty = normalize_row(line)',
+     '    for line in lines:\n        name, qty = normalize_row(line)'),
+    ('return apply_discount(subtotal(items), percent)',
+     '    if percent < 0:\n        raise ValueError("discount must not be '
+     'negative")\n    return apply_discount(subtotal(items), percent)',
+     '    return apply_discount(subtotal(items), percent)'),
+    ('return ratio(part, whole) * 100',
+     '    if whole == 0:\n        return 0.0\n'
+     '    return ratio(part, whole) * 100',
+     '    return ratio(part, whole) * 100'),
+    ('return queue.pop(0)[1]',
+     '    if not queue:\n        return None\n    return queue.pop(0)[1]',
+     '    return queue.pop(0)[1]'),
+    ('if qty > 100:',
+     '    if qty >= 100:',
+     '    if qty > 100:'),
+    ('slug = base + SEPARATOR + str(n)',
+     '        slug = base + SEPARATOR + str(n)\n        n += 1',
+     '        slug = base + SEPARATOR + str(n)'),
+]
+
+
+def _fix_for(prompt: str):
+    for needle, replacement, search in FIXES:
+        if needle in prompt:
+            return search, replacement
+    return None, None
+
+
 def respond(body: dict, wire: str = "openai") -> dict:
     prompt = "\n".join(m.get("content", "") for m in body.get("messages", []))
 
@@ -136,6 +180,22 @@ def respond(body: dict, wire: str = "openai") -> dict:
             "estimated_lines_changed": 4,
             "fix_classification": "minimal_edit",
         }), wire=wire)
+
+    # P3 implementation
+    if "OUTPUT FORMAT" in prompt:
+        path = _first_path(prompt)
+        search, replacement = _fix_for(prompt)
+        if search is None:
+            return _reply(prompt, "I cannot determine the fix.", wire=wire)
+        if "REPLACE {0}:".format(path) in prompt or "<<<<<<< REPLACE" in prompt:
+            m = re.search(r"REPLACE \S+?:(\d+)-(\d+)", prompt)
+            if m:
+                return _reply(prompt, f"<<<<<<< REPLACE {path}:{m.group(1)}-"
+                                      f"{m.group(2)}\n{replacement}\n>>>>>>>",
+                              wire=wire)
+        return _reply(prompt,
+                      f"<<<<<<< SEARCH {path}\n{search}\n=======\n"
+                      f"{replacement}\n>>>>>>> REPLACE", wire=wire)
 
     return _reply(prompt, '{"ok": true}', wire=wire)
 

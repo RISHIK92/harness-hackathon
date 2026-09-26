@@ -13,12 +13,13 @@ from . import exits
 from .budget import Budgets
 from .context.assemble import Assembler
 from .context.events import EventLog
+from .edit.apply import EditFailure
 from .localize import sbfl as SBFL
 from .localize.oracle import find as find_oracle
 from .localize.router import Signals, route as route_of
 from .logging_ui import Logger
 from .model import bootstrap as boot
-from .phases import p0_triage, p1_investigate, p2_scope
+from .phases import p0_triage, p1_investigate, p2_scope, p3_implement
 from .phases.ctx import PhaseContext
 from .records import RootCauseRecord
 from .repo import external as EXT
@@ -144,8 +145,30 @@ class Orchestrator:
             self.log.raw("dry run: P0-P2 only, nothing was written")
             return exits.NO_FIX
 
-        self.log.phase("P3")
-        self.log.line("implementation lands in WP5")
+        # -- P3 implement --------------------------------------------------
+        self.events.append("phase_start", "P3", {})
+        impl = p3_implement.Implementation(ctx)
+        feedback = ""
+        applied = None
+        for attempt in range(3):
+            try:
+                applied, flags = impl.run(issue, root_cause, plan, feedback)
+                break
+            except EditFailure as exc:
+                self.log.warn(f"edit rejected: {exc}")
+                self.events.append("degradation", "P3",
+                                   {"stage": exc.stage, "detail": exc.detail})
+                feedback = exc.feedback()
+        if applied is None:
+            self.log.warn("no appliable edit after 3 attempts")
+            self.workspace.revert_all()
+            return exits.NO_FIX
+        self.events.append("phase_end", "P3",
+                           {"files": [a.path for a in applied]})
+        self._write("diff.patch", {"diff": self.workspace.diff()})
+
+        self.log.phase("P4")
+        self.log.line("verification lands in WP6")
         return exits.NO_FIX
 
     # -- helpers -----------------------------------------------------------
