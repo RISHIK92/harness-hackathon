@@ -1,0 +1,20 @@
+id: py-lint-debt
+repository: ./tests/fixtures/py-lint-debt
+task_type: BUG_FIX
+bug_class: logic
+
+issue: |
+  percentage(0, 0) raises ZeroDivisionError. It should return 0.0 when the whole is zero.
+
+setup: []
+tests: [pytest -q]
+
+expected:
+  target_file: src/legacy/calc.py
+  reference_diff_lines: 4
+  pre_existing_failures: 0
+
+success:
+  - tests_pass
+  - no_new_failures
+  - lint_gate_did_not_block

@@ -1,0 +1,19 @@
+id: py-env-missing
+repository: ./tests/fixtures/py-env-missing
+task_type: CONFIG
+bug_class: config
+
+issue: |
+  The mailer test suite fails with KeyError: 'MAILER_ENDPOINT' on a fresh checkout.
+
+setup: []
+tests: [pytest -q]
+
+expected:
+  target_file: null
+  reference_diff_lines: 0
+  pre_existing_failures: 0
+
+success:
+  - classified_as_config
+  - no_speculative_code_change

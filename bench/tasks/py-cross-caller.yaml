@@ -1,0 +1,20 @@
+id: py-cross-caller
+repository: ./tests/fixtures/py-cross-caller
+task_type: FEATURE
+bug_class: logic
+
+issue: |
+  haversine() should accept a unit argument ("km" default, "mi" supported) so callers can request miles.
+
+setup: []
+tests: [pytest -q]
+
+expected:
+  target_file: src/geo/distance.py
+  reference_diff_lines: 8
+  pre_existing_failures: 0
+
+success:
+  - tests_pass
+  - no_new_failures
+  - callers_identified

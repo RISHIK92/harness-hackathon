@@ -50,8 +50,15 @@ def score(root_cause, plan, verify, workspace, cfg) -> ConfidenceReport:
         verify.judge.addresses and verify.judge.conclusive)
 
     # C3 -- all existing tests pass (HARD)
+    #
+    # The oracle is the test the issue is ABOUT. It is red at baseline by
+    # definition, so classification calls it "pre-existing" and it never
+    # appears in `blocking`. If it is still red after the fix, the fix did
+    # not work -- reporting success there is the exact false positive FR-35
+    # exists to prevent.
     ran_tests = bool(verify.full or verify.scoped)
-    r.existing_tests_pass = ran_tests and not verify.blocking
+    r.existing_tests_pass = (ran_tests and not verify.blocking
+                             and verify.oracle_passes is not False)
 
     # C4 -- no unintended file changes (HARD)
     changed = set(workspace.changed_files())

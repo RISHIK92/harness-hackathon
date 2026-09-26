@@ -1,0 +1,25 @@
+id: py-offbyone
+repository: ./tests/fixtures/py-offbyone
+task_type: BUG_FIX
+bug_class: logic
+
+issue: |
+  parse_date crashes with IndexError when the input has no separator.
+  
+  Repro:
+      parse_date("20260131")
+  
+  Expected a ValueError with a clear message; got IndexError: list index out of range.
+
+setup: []
+tests: [pytest -q]
+
+expected:
+  target_file: src/dateparse/parser.py
+  reference_diff_lines: 4
+  pre_existing_failures: 0
+
+success:
+  - tests_pass
+  - no_new_failures
+  - diff_lines <= 15

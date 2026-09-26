@@ -1,0 +1,26 @@
+id: py-upstream
+repository: ./tests/fixtures/py-upstream
+task_type: BUG_FIX
+bug_class: missing_case
+
+issue: |
+  Importing a CSV file that ends with a blank line fails.
+  
+  ValueError: not enough values to unpack (expected 2, got 1)
+    File "src/importer/rows.py", line 19, in import_csv
+      name, qty = normalize_row(line)
+  
+  The error surfaces in import_csv but the empty line is produced further up.
+
+setup: []
+tests: [pytest -q]
+
+expected:
+  target_file: src/importer/rows.py
+  reference_diff_lines: 3
+  pre_existing_failures: 0
+
+success:
+  - tests_pass
+  - no_new_failures
+  - diff_lines <= 12

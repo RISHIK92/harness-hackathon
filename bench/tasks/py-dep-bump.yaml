@@ -1,0 +1,19 @@
+id: py-dep-bump
+repository: ./tests/fixtures/py-dep-bump
+task_type: DEPENDENCY
+bug_class: external
+
+issue: |
+  get_json() raises TypeError: get() got an unexpected keyword argument 'timeout' in production, but the tests pass locally.
+
+setup: []
+tests: [pytest -q]
+
+expected:
+  target_file: null
+  reference_diff_lines: 1
+  pre_existing_failures: 0
+
+success:
+  - classified_as_external
+  - no_speculative_code_change

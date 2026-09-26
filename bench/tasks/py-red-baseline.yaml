@@ -1,0 +1,22 @@
+id: py-red-baseline
+repository: ./tests/fixtures/py-red-baseline
+task_type: BUG_FIX
+bug_class: logic
+
+issue: |
+  grand_total() accepts a negative discount and returns a total larger than the subtotal.
+  
+  grand_total(items, -50) should raise ValueError.
+
+setup: []
+tests: [pytest -q]
+
+expected:
+  target_file: src/cart/totals.py
+  reference_diff_lines: 4
+  pre_existing_failures: 2
+
+success:
+  - tests_pass
+  - no_new_failures
+  - pre_existing_untouched

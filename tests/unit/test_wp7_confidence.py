@@ -335,3 +335,32 @@ def test_best_attempt_tie_breaks_on_judge_then_size():
 def test_no_attempts_yields_none():
     from harness.orchestrator import Orchestrator
     assert Orchestrator._best([]) is None
+
+
+# -- regression: a still-red oracle is not "pre-existing, therefore fine" ---
+def test_a_failing_oracle_blocks_c3(tmp_path):
+    """The oracle is red at baseline by definition, so it is classified
+    pre-existing and never appears in `blocking`. It must still block."""
+    rc, plan = base_records()
+    v = FakeVerify(full=FakeCls(pre=["tests::test_target"]),
+                   judge=FakeJudge(), oracle_passes=False)
+    r = score(rc, plan, v, FakeWorkspace(["src/a.py"]), make_cfg(tmp_path))
+    assert r.existing_tests_pass is False
+    assert decide(r, 1, 5) is Action.REIMPLEMENT_TARGETED
+
+
+def test_a_passing_oracle_satisfies_c2_and_c3(tmp_path):
+    rc, plan = base_records()
+    v = FakeVerify(full=FakeCls(), judge=FakeJudge(addresses=False),
+                   oracle_passes=True)
+    r = score(rc, plan, v, FakeWorkspace(["src/a.py"]), make_cfg(tmp_path))
+    assert r.existing_tests_pass is True
+    assert r.fix_addresses_root_cause is True
+
+
+def test_no_oracle_leaves_c3_to_the_blocking_set(tmp_path):
+    rc, plan = base_records()
+    v = FakeVerify(full=FakeCls(pre=["old"]), judge=FakeJudge(),
+                   oracle_passes=None)
+    r = score(rc, plan, v, FakeWorkspace(["src/a.py"]), make_cfg(tmp_path))
+    assert r.existing_tests_pass is True

@@ -105,6 +105,13 @@ FIXES = [
     ('if qty > 100:',
      '    if qty >= 100:',
      '    if qty > 100:'),
+    ('def haversine(lat1, lon1, lat2, lon2):',
+     'def haversine(lat1, lon1, lat2, lon2, unit="km"):',
+     'def haversine(lat1, lon1, lat2, lon2):'),
+    ('return 2 * r * math.asin(math.sqrt(a))',
+     '    km = 2 * r * math.asin(math.sqrt(a))\n'
+     '    return km * 0.621371 if unit == "mi" else km',
+     '    return 2 * r * math.asin(math.sqrt(a))'),
     ('slug = base + SEPARATOR + str(n)',
      '        slug = base + SEPARATOR + str(n)\n        n += 1',
      '        slug = base + SEPARATOR + str(n)'),

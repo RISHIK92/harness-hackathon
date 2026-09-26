@@ -1,0 +1,20 @@
+id: py-flaky
+repository: ./tests/fixtures/py-flaky
+task_type: BUG_FIX
+bug_class: logic
+
+issue: |
+  pop() raises IndexError on an empty queue. It should return None instead.
+
+setup: []
+tests: [pytest -q]
+
+expected:
+  target_file: src/sched/queue.py
+  reference_diff_lines: 4
+  pre_existing_failures: 0
+
+success:
+  - tests_pass
+  - no_new_failures
+  - flake_not_blocking

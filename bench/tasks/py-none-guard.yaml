@@ -1,0 +1,24 @@
+id: py-none-guard
+repository: ./tests/fixtures/py-none-guard
+task_type: BUG_FIX
+bug_class: null
+
+issue: |
+  display_name() raises TypeError when the user id is not in the store.
+  
+  TypeError: 'NoneType' object is not subscriptable
+    File "src/usersvc/profile.py", line 12, in display_name
+      return profile["name"].title()
+
+setup: []
+tests: [pytest -q]
+
+expected:
+  target_file: src/usersvc/profile.py
+  reference_diff_lines: 4
+  pre_existing_failures: 0
+
+success:
+  - tests_pass
+  - no_new_failures
+  - diff_lines <= 12

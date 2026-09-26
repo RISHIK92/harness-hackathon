@@ -1,0 +1,20 @@
+id: py-vague
+repository: ./tests/fixtures/py-vague
+task_type: BUG_FIX
+bug_class: logic
+
+issue: |
+  Sometimes saving a second post with the same title just hangs.
+
+setup: []
+tests: [pytest -q]
+
+expected:
+  target_file: src/slugify/core.py
+  reference_diff_lines: 2
+  pre_existing_failures: 0
+
+success:
+  - tests_pass
+  - no_new_failures
+  - diff_lines <= 10

@@ -1,0 +1,20 @@
+id: py-regression
+repository: ./tests/fixtures/py-regression
+task_type: BUG_FIX
+bug_class: logic
+
+issue: |
+  Volume discount stopped applying at exactly 100 units. It used to work; something changed recently.
+
+setup: []
+tests: [pytest -q]
+
+expected:
+  target_file: src/pricing/rules.py
+  reference_diff_lines: 2
+  pre_existing_failures: 0
+
+success:
+  - tests_pass
+  - no_new_failures
+  - commit_identified
