@@ -308,6 +308,7 @@ class Orchestrator:
         REPORT.write(self.run_dir, text)
         REPORT.render_stdout(self.log, self.cfg, summary, root_cause, plan,
                              vres, conf, self.workspace, self.budgets)
+        self._record_last_run()
         self.log.raw("")
         self.log.raw("=== DIFF ===")
         self.log.raw(self.workspace.diff() or "(no changes)")
@@ -356,6 +357,22 @@ class Orchestrator:
             events=self.events, budgets=self.budgets, caps=self.caps,
             assembler=Assembler(self.cfg, self.log, self.bs.primary.ctx),
         )
+
+    def _record_last_run(self) -> None:
+        """Leave a pointer where `make test` runs, so replay needs no args.
+
+        A run's artifacts live in the TARGET repository, which may be nowhere
+        near the directory `make test` is invoked from.
+        """
+        try:
+            pointer = Path.cwd() / ".harness"
+            pointer.mkdir(parents=True, exist_ok=True)
+            (pointer / "last_run.json").write_text(json.dumps({
+                "repo": str(self.cfg.repo_path),
+                "trajectory": str(self.run_dir / "trajectory.jsonl"),
+            }), encoding="utf-8")
+        except OSError:
+            pass
 
     def _write(self, name: str, payload: dict) -> None:
         try:

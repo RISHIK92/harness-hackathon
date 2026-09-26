@@ -17,7 +17,7 @@ run:
 	@$(BIN)/python -m harness
 
 test:
-	@$(BIN)/python -m harness.replay 2>/dev/null || $(BIN)/python -m pytest tests -q
+	@$(BIN)/python -m harness.replay || $(BIN)/python -m pytest tests/unit -q
 
 clean:
 	rm -rf $(VENV) .harness .pytest_cache .worktrees

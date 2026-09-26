@@ -34,9 +34,22 @@ def cache_key(model: str, messages: list, params: dict) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
 
 
-def find_trajectory(repo: Path) -> Path | None:
+def find_trajectory(repo: Path) -> tuple[Path, Path] | tuple[None, None]:
+    """(trajectory, target repo). Falls back to the last-run pointer."""
     candidate = repo / ".harness" / "run" / "trajectory.jsonl"
-    return candidate if candidate.is_file() else None
+    if candidate.is_file():
+        return candidate, repo
+
+    pointer = repo / ".harness" / "last_run.json"
+    if pointer.is_file():
+        try:
+            d = json.loads(pointer.read_text("utf-8"))
+            traj, target = Path(d["trajectory"]), Path(d["repo"])
+            if traj.is_file():
+                return traj, target
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+    return None, None
 
 
 def replay(trajectory: Path, repo: Path, log: Logger) -> tuple[list, bool]:
@@ -112,13 +125,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo = Path(args.repo).resolve()
-    path = Path(args.trajectory) if args.trajectory else find_trajectory(repo)
+    if args.trajectory:
+        path, target = Path(args.trajectory), repo
+    else:
+        path, target = find_trajectory(repo)
+        target = target or repo
     log = Logger()
     if not path or not path.is_file():
         log.raw("replay: no recorded run found "
                 "(.harness/run/trajectory.jsonl)")
         return 2                       # `make test` falls through to pytest
-    steps, ok = replay(path, repo, log)
+    steps, ok = replay(path, target, log)
     if ok:
         log.raw("replay: every recorded step reproduced, with no API key")
         return 0
