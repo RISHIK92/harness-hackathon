@@ -154,11 +154,8 @@ def read_issue(argv: list[str]) -> str:
             "or pipe the issue on stdin."
         )
 
-    print("Paste the issue, then Ctrl-D:", file=sys.stderr)
-    data = sys.stdin.read()
-    if not data.strip():
-        raise ConfigError("No issue supplied.")
-    return data
+    # A terminal with no issue is not an error: the console will ask.
+    return ""
 
 
 def load(argv: list[str] | None = None) -> Config:

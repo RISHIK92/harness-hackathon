@@ -4,13 +4,11 @@ VENV := .venv
 BIN := $(VENV)/bin
 
 setup:
-	@echo "=== AI Coding Harness - setup ==="
 	$(PY) -m venv $(VENV)
 	$(BIN)/pip install --quiet --upgrade pip
 	$(BIN)/pip install --quiet -r requirements-core.txt
 	-$(BIN)/pip install --quiet -r requirements-optional.txt
-	@$(BIN)/python -m harness.selfcheck
-	@echo "=== setup complete ==="
+	@$(BIN)/python -m harness.setup_ui
 
 run:
 	@if [ -z "$$AI_API_KEY" ]; then echo "Error: AI_API_KEY is not set."; echo "Usage: AI_API_KEY=... make run ISSUE='<issue text>'"; exit 1; fi

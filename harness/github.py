@@ -264,8 +264,13 @@ def _authed_url(url: str) -> str:
     return url
 
 
-def prepare(issue_text: str, cfg, log) -> tuple[str, Path] | None:
-    """If the issue is a GitHub reference, fetch it and clone. Else None."""
+def prepare(issue_text: str, cfg, log, confirm=None
+            ) -> tuple[str, Path] | None:
+    """If the issue is a GitHub reference, fetch it and clone. Else None.
+
+    `confirm(fetched, target, cfg) -> bool` gets a say before anything is
+    cloned; returning False aborts without touching the disk.
+    """
     ref = parse_ref(issue_text)
     if not ref:
         return None
@@ -273,6 +278,10 @@ def prepare(issue_text: str, cfg, log) -> tuple[str, Path] | None:
     workspace = Path(os.environ.get("HARNESS_WORKSPACE")
                      or (Path.cwd() / ".harness" / "workspace"))
     depth = int(os.environ.get("HARNESS_CLONE_DEPTH", "0") or 0)
+    if confirm is not None:
+        target = workspace / f"{ref.repo}-{ref.number}"
+        if not confirm(fetched, target, cfg):
+            return None
     repo = clone(fetched, workspace, log, depth)
     text = fetched.as_issue_text()
     if log:

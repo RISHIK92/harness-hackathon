@@ -19,6 +19,41 @@ make setup
 make run ISSUE="parse_date crashes when the input has no separator"
 ```
 
+### The console
+
+Run `make run` at a terminal with no issue and it asks:
+
+```
+  ╭──────────────────────────────────────────────────────────────╮
+  │ ◈ HARNESS                                               v2.1 │
+  ╰──────────────────────────────────────────────────────────────╯
+    provider     anthropic · claude-opus-…  T2
+    repository   /work/acme-api
+
+    What should I work on?
+
+  ▸ paste an issue                  multi-line, Ctrl-D to finish
+    github issue or pull request    owner/repo#123
+    a local repository              /work/acme-api
+    recent                          3 previous run(s)
+
+    ↑↓ move   tab run   q quit
+```
+
+After a run it offers the diff, the full report, posting the report back to
+the issue, or another run.
+
+This is not a mode and it is not labelled as one: it is what the CLI does
+when it has a terminal and no issue, the same way `git` pages and `ls`
+colourises. **The run is identical either way** -- same phases, same budgets,
+same verification, same confidence report. Only the way you say what to work
+on differs.
+
+It can never be reached by an automated run: it needs a TTY on both stdin and
+stdout, and no issue supplied. `HARNESS_NONINTERACTIVE=1` disables it
+outright. `tests/unit/test_nonblocking.py` runs the real entry points under a
+hard timeout to keep that true.
+
 ### From a GitHub issue or pull request
 
 Hand it a reference and nothing else. The harness fetches the issue with its
