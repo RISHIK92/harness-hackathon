@@ -20,6 +20,7 @@ class Discovery:
     ids: list[str] = field(default_factory=list)
     raw_count: int = 0
     ctx: dict = field(default_factory=dict)
+    price: dict = field(default_factory=dict)      # id -> USD per input token
     ok: bool = False
     error: str = ""
 
@@ -57,12 +58,18 @@ def discover(provider: Provider, api_key: str, cache_dir: Path | None = None,
                                         provider.models_path, timeout=timeout)
             all_ids = adapter.model_ids(items)
             ids = [m for m in all_ids if chat_capable(m)]
-            ctx = {}
+            ctx, price = {}, {}
+            getter = getattr(adapter, "input_price", None)
             for item in items:
                 mid = item.get("id") or item.get("name") or ""
                 if mid in ids:
                     ctx[mid] = ctx_of(mid, adapter.context_window(item))
-            result = Discovery(ids=ids, raw_count=len(all_ids), ctx=ctx, ok=True)
+                    if getter is not None:
+                        found = getter(item)
+                        if found is not None:
+                            price[mid] = found
+            result = Discovery(ids=ids, raw_count=len(all_ids), ctx=ctx,
+                               price=price, ok=True)
             if cache_file:
                 try:
                     cache_file.parent.mkdir(parents=True, exist_ok=True)

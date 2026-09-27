@@ -61,12 +61,20 @@ PROVIDERS: dict[str, Provider] = {
                          "openai", "/models"),
     "mistral": Provider("mistral", "https://api.mistral.ai/v1",
                         "openai", "/models"),
+    # Alibaba's OpenAI-compatible endpoint for Qwen. The international host
+    # is the safer default; a mainland key works by setting AI_BASE_URL.
+    "qwen": Provider("qwen",
+                     "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                     "openai", "/models"),
     "openai_compatible": Provider("openai_compatible", "",
                                   "openai", "/models"),
 }
 
 # Fixed probe order for a bare "sk-" key (SPEC.md 3.2 ambiguity ladder).
-AMBIGUOUS_CANDIDATES = ("openai", "deepseek", "mistral")
+# DashScope (Qwen) also issues plain `sk-` keys, so without it in this
+# ladder a Qwen key probed openai/deepseek/mistral, failed all three
+# and fell back to a wire that could not serve it.
+AMBIGUOUS_CANDIDATES = ("openai", "deepseek", "qwen", "mistral")
 
 
 def detect_provider(api_key: str) -> str:

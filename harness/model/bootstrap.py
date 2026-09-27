@@ -11,7 +11,7 @@ from ..config import ConfigError
 from .detect import AMBIGUOUS, PROVIDERS, Provider, detect_provider, resolve
 from .discover import Discovery, discover, probe_host
 from .gateway import Gateway, ModelSpec
-from .rank import NoChatModel, ctx_of, select_models, tier_of
+from .rank import NoChatModel, ctx_of, select_models, tier_of, cap_tier_for_context
 from .router import Router
 
 
@@ -54,14 +54,23 @@ def bring_up(cfg, log, events=None, budgets=None) -> Bootstrap:
     try:
         primary_id, cheap_id = select_models(
             disc.ids, provider.name,
-            model_override=cfg.model, cheap_override=cfg.cheap_model)
+            model_override=cfg.model, cheap_override=cfg.cheap_model,
+            price=getattr(disc, "price", None), ctx=disc.ctx)
     except NoChatModel as exc:
         raise ConfigError(str(exc)) from exc
 
-    primary = ModelSpec(primary_id, cfg.tier or tier_of(primary_id, provider.name),
-                        ctx_of(primary_id, disc.ctx.get(primary_id)))
-    cheap = ModelSpec(cheap_id, tier_of(cheap_id, provider.name),
-                      ctx_of(cheap_id, disc.ctx.get(cheap_id)))
+    # The tier is a promise about how much of the window the profile will
+    # use, so it cannot exceed what the window allows. An explicit
+    # HARNESS_TIER is the operator's call and is left alone.
+    primary_ctx = ctx_of(primary_id, disc.ctx.get(primary_id))
+    cheap_ctx = ctx_of(cheap_id, disc.ctx.get(cheap_id))
+    primary_tier = cfg.tier or cap_tier_for_context(
+        tier_of(primary_id, provider.name), primary_ctx)
+    cheap_tier = cap_tier_for_context(
+        tier_of(cheap_id, provider.name), cheap_ctx)
+
+    primary = ModelSpec(primary_id, primary_tier, primary_ctx)
+    cheap = ModelSpec(cheap_id, cheap_tier, cheap_ctx)
     if primary.id == cheap.id:
         degraded.append("single_model")
 
@@ -122,6 +131,11 @@ def print_startup(bs: Bootstrap, cfg, log, repo_info: dict | None = None) -> Non
                              f"language {repo_info.get('language','unknown')}")
         if repo_info.get("test_cmd"):
             log.kv("test command", repo_info["test_cmd"], t.dim)
+        else:
+            # Omitting this line hid the most important fact about the run:
+            # there is nothing to verify a fix against.
+            log.kv("test command", "none found -- no suite to verify against",
+                   t.warn)
         if repo_info.get("lint_cmd"):
             log.kv("lint command", repo_info["lint_cmd"], t.dim)
 
