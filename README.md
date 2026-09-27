@@ -16,7 +16,7 @@ for the build plan.
 ```bash
 export AI_API_KEY="<your key>"
 make setup
-make run ISSUE="parse_date crashes when the input has no separator"
+make run ISSUE="https://github.com/owner/repo/pull/456" (required for smooth evaluation) PR=True/False (optional)
 ```
 
 ### The console
