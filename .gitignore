@@ -9,3 +9,6 @@ coverage.json
 *.log
 .env
 tests/fixtures/
+
+# A separate project that happens to live in this directory.
+photon/

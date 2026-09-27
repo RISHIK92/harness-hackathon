@@ -1,0 +1,27 @@
+id: js-dashboard-buckets
+repository: ~/mindmaze-bug-fixture
+task_type: BUG_FIX
+bug_class: logic
+
+issue: |
+  Dashboard project counts don't add up once projects are nearly done.
+
+  A user with 4 projects at 10%, 60%, 95% and 100% sees total: 4 but
+  onTrack + atRisk + delayed = 2. The finished projects are counted
+  nowhere, so the dashboard looks like they vanished.
+
+  Expected: every project is counted in exactly one bucket. Projects at
+  90% or more should be reported as `completed`.
+
+setup: []
+tests: [node --test test/dashboardStats.test.js]
+
+expected:
+  target_file: src/lib/dashboardStats.js
+  reference_diff_lines: 4
+  pre_existing_failures: 0
+
+success:
+  - tests_pass
+  - no_new_failures
+  - diff_lines <= 15

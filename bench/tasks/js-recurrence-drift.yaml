@@ -1,0 +1,28 @@
+id: js-recurrence-drift
+repository: ~/mindmaze-bug-fixture
+task_type: BUG_FIX
+bug_class: logic
+
+issue: |
+  Recurring planner tasks are wrong in a few ways.
+
+  1. My rent reminder is set monthly starting 31 January. It shows up on
+     28 Feb (fine), then 28 Mar, 28 Apr ... it should be the last day of
+     each month it can be, i.e. 31 Mar, 30 Apr, 31 May.
+  2. I deleted just the 31 March occurrence, but the reminder that day is
+     still there for me (I'm in India, UTC+5:30).
+  3. A series set to "4 times" started showing more than 4 occurrences once
+     I scrolled the calendar forward.
+
+setup: []
+tests: [node --test test/recurrence.test.js]
+
+expected:
+  target_file: src/lib/recurrence.js
+  reference_diff_lines: 30
+  pre_existing_failures: 0
+
+success:
+  - tests_pass
+  - no_new_failures
+  - diff_lines <= 60

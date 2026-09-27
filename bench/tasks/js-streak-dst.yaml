@@ -1,0 +1,23 @@
+id: js-streak-dst
+repository: ~/mindmaze-bug-fixture
+task_type: BUG_FIX
+bug_class: logic
+
+issue: |
+  My habit streak reset to 2 this week even though I logged something every
+  single day. I had a 5-day streak going, then on Monday 9 March it dropped.
+  It only happens around that weekend; the rest of the year the streak looks
+  right, and the "longest streak" number is wrong too.
+
+setup: []
+tests: [node --test test/streaks.test.js]
+
+expected:
+  target_file: src/lib/dates.js
+  reference_diff_lines: 4
+  pre_existing_failures: 0
+
+success:
+  - tests_pass
+  - no_new_failures
+  - diff_lines <= 20

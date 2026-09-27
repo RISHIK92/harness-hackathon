@@ -447,15 +447,31 @@ def test_pop_on_empty_queue():
     assert pop([]) is None
 ''',
         "tests/test_timing.py": '''
-"""Timing-sensitive test that fails intermittently."""
-import time
+"""A test that fails the first time it is asked and passes on a re-run.
+
+It used to sleep 1ms and assert the elapsed time was under 1.1ms. Idle that
+is borderline; under load it failed EVERY time, including on the re-run, so
+the harness rightly called it a real failure -- and the suite's "a flake
+does not block" test failed for a reason unrelated to flakes.
+
+The marker lives in the system temp directory, keyed by this file's path.
+Inside the repository it would show up as an unintended change and fail C4;
+keyed by path it is fresh for each run (the fixture is copied to a new
+workspace) and shared across the re-runs within one.
+"""
+import hashlib
+import tempfile
+from pathlib import Path
+
+KEY = hashlib.sha1(str(Path(__file__).resolve()).encode()).hexdigest()[:16]
+MARKER = Path(tempfile.gettempdir()) / f"harness-flake-{KEY}"
 
 
 def test_tick_is_fast():
-    start = time.perf_counter()
-    time.sleep(0.001)
-    # Deliberately tight: passes or fails depending on scheduler jitter.
-    assert time.perf_counter() - start < 0.0011
+    if MARKER.exists():
+        return                      # asked again: this time it holds
+    MARKER.write_text("seen\\n")
+    raise AssertionError("transient scheduler jitter")
 ''',
         "conftest.py": 'import sys, pathlib\nsys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))\n',
     }, {

@@ -38,28 +38,36 @@ def _reply(prompt: str, content: str, tool_calls=None,
             "usage": u}
 
 
+# Every language the harness can localize, not just Python. A mock that
+# only recognises `.py` invents a path on a JavaScript repository, and the
+# resulting "file does not exist" looks like a harness bug when it is a
+# limitation of the test double.
+SRC_EXT = r"(?:py|js|mjs|cjs|jsx|ts|tsx|go|rb|java|rs|php)"
+PATH_RX = rf"\b((?:[\w.-]+/)+[\w.-]+\.{SRC_EXT})\b"
+
+
 def _first_path(prompt: str) -> str:
     """Anchor on the ranked suspects the harness supplied, as a model would.
 
     Falls back to any source path, then to any path at all.
     """
-    ranked = re.findall(r"\b((?:[\w.-]+/)+[\w.-]+\.py):\d+\s+suspiciousness",
+    ranked = re.findall(PATH_RX.rstrip(r"\b") + r":\d+\s+suspiciousness",
                         prompt)
     if ranked:
         return ranked[0]
-    paths = re.findall(r"\b((?:[\w.-]+/)+[\w.-]+\.py)\b", prompt)
+    paths = re.findall(PATH_RX, prompt)
     for p in paths:
-        if re.search(r"(^|/)tests?/|test_|_test\.|__init__\.py", p):
+        if re.search(r"(^|/)tests?/|test_|_test\.|\.test\.|__init__\.py", p):
             continue
         return p
     return paths[0] if paths else "src/unknown.py"
 
 
 def _first_line(prompt: str) -> int:
-    m = re.search(r"\.py:(\d+)\s+suspiciousness", prompt)
+    m = re.search(rf"\.{SRC_EXT}:(\d+)\s+suspiciousness", prompt)
     if m:
         return int(m.group(1))
-    m = re.search(r"\.py:(\d+)", prompt)
+    m = re.search(rf"\.{SRC_EXT}:(\d+)", prompt)
     return int(m.group(1)) if m else 1
 
 
@@ -115,7 +123,25 @@ FIXES = [
     ('slug = base + SEPARATOR + str(n)',
      '        slug = base + SEPARATOR + str(n)\n        n += 1',
      '        slug = base + SEPARATOR + str(n)'),
+    # JavaScript. The evaluator's path is `make run ISSUE=<github url>`, and
+    # until this entry existed no offline rehearsal of it could produce a
+    # patch -- every scripted fix was Python, so the run always ended NO_FIX
+    # for a reason that had nothing to do with the harness.
+    ('return { total: projects.length, onTrack, atRisk, delayed };',
+     '  const completed = projects.filter((p) => p.progress >= 90).length;\n'
+     '  return { total: projects.length, onTrack, atRisk, delayed, '
+     'completed };',
+     '  return { total: projects.length, onTrack, atRisk, delayed };'),
 ]
+
+
+def _numbered_lines(prompt: str) -> list:
+    """The file the harness showed, with its line-number gutter removed."""
+    m = re.search(r"THE CODE TO CHANGE:\n(.*?)\n\nCONSTRAINTS", prompt, re.S)
+    if not m:
+        return []
+    return [re.sub(r"^\s*\d+\s*\|\s?", "", ln)
+            for ln in m.group(1).splitlines()]
 
 
 def _fix_for(prompt: str):
@@ -226,6 +252,27 @@ def respond(body: dict, wire: str = "openai") -> dict:
         if "REPLACE {0}:".format(path) in prompt or "<<<<<<< REPLACE" in prompt:
             m = re.search(r"REPLACE \S+?:(\d+)-(\d+)", prompt)
             if m:
+                # Rebuild the requested span from the code the harness showed,
+                # applying the fix inside it. Emitting a fixed string for any
+                # span deletes whatever else the span covered -- a closing
+                # brace, say -- which the harness rightly rejects as a syntax
+                # error. A competent model edits the lines it was given.
+                start, end = int(m.group(1)), int(m.group(2))
+                body = _numbered_lines(prompt)
+                if body:
+                    # For LINE_RANGE the harness shows only the region, so
+                    # absolute line numbers do not index into it.
+                    span = (body if len(body) <= (end - start + 1)
+                            else body[start - 1:end])
+                    text = "\n".join(span)
+                    if search.strip() and search.strip() in text:
+                        text = text.replace(search, replacement, 1)
+                    elif search.strip() and search.strip() in "\n".join(body):
+                        text = None        # the fix is outside this span
+                    if text is not None:
+                        return _reply(prompt,
+                                      f"<<<<<<< REPLACE {path}:{start}-{end}\n"
+                                      f"{text}\n>>>>>>>", wire=wire)
                 return _reply(prompt, f"<<<<<<< REPLACE {path}:{m.group(1)}-"
                                       f"{m.group(2)}\n{replacement}\n>>>>>>>",
                               wire=wire)
