@@ -25,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from harness.localize import from_tests as FT            # noqa: E402
 from harness.phases.p2_scope import harden               # noqa: E402
-from harness.records import ChangePlan, RootCauseRecord  # noqa: E402
+from harness.records import (ChangePlan, FileIntent,  # noqa: E402
+                             RootCauseRecord)
 from harness.repo.search import Search                   # noqa: E402
 
 FAILING = ["every project lands in exactly one bucket",
@@ -266,3 +267,100 @@ def test_an_explicit_budget_is_never_overridden(monkeypatch):
     assert "HARNESS_TIME_BUDGET" in source and "scale_to_repo" in source
     idx = source.index("scale_to_repo")
     assert "if not (os.environ.get" in source[max(0, idx - 300):idx]
+
+
+# ---------------------------------------------------------------------------
+# From the orca run: the model diagnosed the bug exactly, then scoping
+# targeted a CI helper the issue never mentions.
+# ---------------------------------------------------------------------------
+
+class _Anchors:
+    def __init__(self, files):
+        self.files = list(files)
+        self.symbols = []
+        self.errors = []
+        self.frames = []
+
+
+class _Issue:
+    def __init__(self, files):
+        self.anchors = _Anchors(files)
+
+
+def test_a_plan_touching_nothing_the_issue_names_is_steered_back(tmp_path):
+    """`.github/actions/.../storage-lease.mjs` exists, so the "drop paths
+    that do not exist" filter passed it, and the empty-plan fallback never
+    fired because the plan was not empty -- just wrong."""
+    (tmp_path / "src" / "relay").mkdir(parents=True)
+    (tmp_path / "src" / "relay" / "pty-handler.ts").write_text("const x = 1\n")
+    (tmp_path / ".github" / "actions").mkdir(parents=True)
+    (tmp_path / ".github" / "actions" / "lease.mjs").write_text("export {}\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True,
+                   stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True,
+                   stdin=subprocess.DEVNULL)
+
+    plan = ChangePlan(files_to_change=[FileIntent(".github/actions/lease.mjs")],
+                      estimated_lines_changed=10)
+    ctx = _Ctx(tmp_path)
+    harden(ctx, plan,
+           RootCauseRecord(statement="LF instead of CR", files=[]),
+           candidates=[], issue=_Issue(["src/relay/pty-handler.ts"]))
+
+    assert [f.path for f in plan.files_to_change] == \
+        ["src/relay/pty-handler.ts"], "kept a plan the issue never supports"
+    assert "off_target" in ctx.degradations
+
+
+def test_a_plan_the_issue_supports_is_left_alone(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.ts").write_text("x\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True,
+                   stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True,
+                   stdin=subprocess.DEVNULL)
+
+    plan = ChangePlan(files_to_change=[FileIntent("src/a.ts")],
+                      estimated_lines_changed=10)
+    ctx = _Ctx(tmp_path)
+    harden(ctx, plan, RootCauseRecord(statement="x", files=[]),
+           candidates=[], issue=_Issue(["src/a.ts"]))
+    assert [f.path for f in plan.files_to_change] == ["src/a.ts"]
+    assert "off_target" not in ctx.degradations
+
+
+def test_a_vague_issue_does_not_steer_anything(tmp_path):
+    """With no anchors the model's choice is all there is; overriding it
+    would be substituting one guess for another."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.ts").write_text("x\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True,
+                   stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True,
+                   stdin=subprocess.DEVNULL)
+
+    plan = ChangePlan(files_to_change=[FileIntent("src/a.ts")],
+                      estimated_lines_changed=10)
+    ctx = _Ctx(tmp_path)
+    harden(ctx, plan, RootCauseRecord(statement="x", files=[]),
+           candidates=[], issue=_Issue([]))
+    assert [f.path for f in plan.files_to_change] == ["src/a.ts"]
+
+
+def test_localization_candidates_also_count_as_support(tmp_path):
+    """A caller the issue did not name, found by localization, is evidence
+    too -- steering must not fight the signal it was built on."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "impl.ts").write_text("x\n")
+    (tmp_path / "src" / "named.ts").write_text("y\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True,
+                   stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True,
+                   stdin=subprocess.DEVNULL)
+
+    plan = ChangePlan(files_to_change=[FileIntent("src/impl.ts")],
+                      estimated_lines_changed=10)
+    ctx = _Ctx(tmp_path)
+    harden(ctx, plan, RootCauseRecord(statement="x", files=[]),
+           candidates=["src/impl.ts"], issue=_Issue(["src/named.ts"]))
+    assert [f.path for f in plan.files_to_change] == ["src/impl.ts"]

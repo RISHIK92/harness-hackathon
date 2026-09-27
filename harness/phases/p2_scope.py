@@ -105,7 +105,7 @@ def scope(ctx, issue, root_cause, candidates=None) -> ChangePlan:
         data = {}
 
     plan = _plan_from(data, root_cause, suspects)
-    harden(ctx, plan, root_cause, candidates or [])
+    harden(ctx, plan, root_cause, candidates or [], issue)
     return plan
 
 
@@ -152,7 +152,7 @@ def _plausible_new_path(path: str) -> bool:
 
 
 def harden(ctx, plan: ChangePlan, root_cause,
-           candidates: list | None = None) -> None:
+           candidates: list | None = None, issue=None) -> None:
     """Everything below is code, because a forgotten caller breaks the build."""
     c = ctx
     known = set(c.search.files())
@@ -209,6 +209,34 @@ def harden(ctx, plan: ChangePlan, root_cause,
                                       if p not in phantom]
         c.log.line(f"dropped {len(phantom)} must-not-change path(s) that do "
                    f"not exist here")
+
+    # 1b. the plan has to touch something the evidence points at.
+    #
+    # On a real run the issue named five files by URL, all of them resolved
+    # in triage, and the model diagnosed the bug exactly -- then scoped the
+    # change to `.github/actions/.../storage-lease.mjs`, a CI helper that
+    # appears nowhere in the issue. Nothing caught it: the path exists, so
+    # the "drop paths that do not exist" filter passed it, and the empty-plan
+    # fallback never fired because the plan was not empty, just wrong.
+    #
+    # Where the issue itself named files, a plan touching none of them --
+    # nor anything localization pointed at -- is an assertion, not evidence.
+    anchored = set(getattr(getattr(issue, "anchors", None), "files", None)
+                   or [])
+    if anchored:
+        supported = anchored | set(candidates or []) | {
+            f.path for f in (root_cause.files or [])}
+        planned = {fi.path for fi in plan.files_to_change}
+        if planned and not (planned & supported):
+            steer = [p for p in list(anchored) + list(candidates or [])
+                     if p in known and not NEVER_TOUCH.search(p)]
+            if steer:
+                c.log.line(f"plan named {sorted(planned)[0]}, which the issue "
+                           f"never mentions; steering to {steer[0]}")
+                c.degraded("off_target",
+                           f"planned {sorted(planned)[0]}; the issue points "
+                           f"at {steer[0]}")
+                plan.files_to_change = [FileIntent(steer[0])]
 
     # 2. test / lock / generated / vendor paths are moved to the deny list
     moved = [fi.path for fi in plan.files_to_change
