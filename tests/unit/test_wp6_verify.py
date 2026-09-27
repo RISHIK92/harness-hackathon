@@ -205,3 +205,180 @@ def test_lint_gate_ignores_non_source_paths(tmp_path):
                set(), silent())
     assert not res.ran and not res.blocks
     assert "no lintable files" in res.reason
+
+
+# ---------------------------------------------------------------------------
+# A repo with no test suite must degrade, not hang and not crash.
+#
+# All three of these shipped together and only showed up on a real JS backend:
+# discovery invented `npx node`, which opens a REPL; the runner left stdin
+# attached, so the REPL waited on the operator's own terminal; and the command
+# was None, which raised from inside subprocess.
+# ---------------------------------------------------------------------------
+
+def test_a_package_json_without_a_framework_yields_no_test_command(tmp_path):
+    """`npx node` is not a test runner -- it is an interactive shell."""
+    from harness.verify.toolchain import discover_toolchain
+
+    (tmp_path / "package.json").write_text(
+        '{"name": "api", "scripts": {"start": "node ./src/index.js"},'
+        ' "dependencies": {"express": "^4"}}')
+    (tmp_path / "index.js").write_text("console.log(1)\n")
+
+    tc = discover_toolchain(tmp_path)
+    assert tc.language == "javascript"
+    assert tc.framework == "", "a missing framework must not be named 'node'"
+    assert not tc.test_cmd, f"invented a test command: {tc.test_cmd!r}"
+    assert tc.test_cmd != "npx node"
+
+
+def test_a_real_framework_is_still_found(tmp_path):
+    from harness.verify.toolchain import discover_toolchain
+
+    (tmp_path / "package.json").write_text(
+        '{"name": "api", "devDependencies": {"vitest": "^1"}}')
+    tc = discover_toolchain(tmp_path)
+    assert tc.framework == "vitest"
+    assert tc.test_cmd == "npx vitest --run"
+
+
+def test_a_test_script_wins_over_having_no_framework(tmp_path):
+    from harness.verify.toolchain import discover_toolchain
+
+    (tmp_path / "package.json").write_text(
+        '{"name": "api", "scripts": {"test": "node --test"}}')
+    tc = discover_toolchain(tmp_path)
+    assert tc.test_cmd == "npm test --silent"
+
+
+def test_an_empty_command_is_refused_rather_than_raising(tmp_path):
+    from harness.verify.runner import run
+
+    for cmd in (None, "", "   "):
+        result = run(cmd, tmp_path, timeout=5, check_deny=False)
+        assert result.exit_code == 127
+        assert "no command" in result.stderr
+
+
+def test_an_interactive_command_cannot_block_the_harness(tmp_path):
+    """stdin is /dev/null, so a REPL exits instead of waiting on the
+    operator's terminal. Without this the run hangs until the timeout."""
+    import sys
+    import time
+    from harness.verify.runner import run
+
+    started = time.time()
+    result = run(f"{sys.executable} -c \"import sys; sys.stdin.read()\"",
+                 tmp_path, timeout=20, check_deny=False)
+    elapsed = time.time() - started
+
+    assert not result.timed_out, "a command reading stdin blocked the harness"
+    assert elapsed < 10, f"took {elapsed:.1f}s: stdin is still attached"
+
+
+def test_every_subprocess_call_closes_stdin():
+    """One inherited stdin anywhere is enough to hang a run."""
+    import ast
+    import pathlib
+
+    offenders = []
+    for path in sorted(pathlib.Path("harness").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if getattr(func, "attr", None) not in ("run", "Popen",
+                                                   "check_output"):
+                continue
+            if getattr(getattr(func, "value", None), "id", "") != "subprocess":
+                continue
+            kwargs = {kw.arg for kw in node.keywords}
+            # `input=` pipes stdin, so it satisfies the rule too -- and
+            # passing both raises ValueError, which is how this very check
+            # once broke `gh pr create`.
+            if not kwargs & {"stdin", "input"}:
+                offenders.append(f"{path}:{node.lineno}")
+    assert not offenders, f"stdin left attached at: {offenders}"
+
+
+def test_no_call_sets_both_stdin_and_input():
+    """subprocess raises ValueError when both are given."""
+    import ast
+    import pathlib
+
+    clashes = []
+    for path in sorted(pathlib.Path("harness").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            if getattr(node.func, "attr", None) not in ("run", "Popen",
+                                                        "check_output"):
+                continue
+            kwargs = {kw.arg for kw in node.keywords}
+            if {"stdin", "input"} <= kwargs:
+                clashes.append(f"{path}:{node.lineno}")
+    assert not clashes, f"stdin and input both set at: {clashes}"
+
+
+# ---------------------------------------------------------------------------
+# TAP. `node --test` is the default JS runner and speaks it, so a repo using
+# it parsed as zero tests -- indistinguishable from "nothing failed".
+# ---------------------------------------------------------------------------
+
+TAP_SAMPLE = """
+TAP version 13
+# Subtest: every project lands in exactly one bucket
+not ok 1 - every project lands in exactly one bucket
+  ---
+  error: 'Expected 4 to equal 2'
+  ...
+# Subtest: bucket boundaries
+not ok 2 - bucket boundaries
+  ---
+  ...
+# Subtest: skipped one
+ok 3 - skipped one # SKIP not relevant
+# Subtest: task completion rate
+ok 4 - task completion rate
+1..4
+# tests 4
+# pass 1
+# fail 2
+# skipped 1
+"""
+
+
+def test_tap_output_is_parsed_rather_than_read_as_an_empty_suite():
+    from harness.verify.parse_results import looks_like_tap, parse_tap
+
+    assert looks_like_tap(TAP_SAMPLE)
+    res = parse_tap(TAP_SAMPLE)
+
+    assert res.total == 4, "a TAP suite must not parse as zero tests"
+    assert res.counts() == {"pass": 1, "fail": 2, "error": 0, "skip": 1}
+    assert "every project lands in exactly one bucket" in res.failing
+    assert "bucket boundaries" in res.failing
+    assert res.confidence == "high"
+
+
+def test_tap_failures_reach_the_dispatcher(tmp_path):
+    """The bug was in `parse`, not only in the TAP reader."""
+    from harness.verify.parse_results import parse
+
+    class R:
+        stdout, stderr, exit_code = TAP_SAMPLE, "", 1
+
+    class TC:
+        framework = ""
+
+    res = parse(R(), TC())
+    assert res.parser == "tap", f"dispatched to {res.parser!r} instead"
+    assert len(res.failing) == 2
+    assert not res.collection_error
+
+
+def test_pytest_output_is_not_mistaken_for_tap():
+    from harness.verify.parse_results import looks_like_tap
+
+    assert not looks_like_tap(
+        "tests/test_a.py::test_one PASSED\ntests/test_b.py::test_two FAILED\n")

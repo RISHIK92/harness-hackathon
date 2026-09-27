@@ -148,6 +148,86 @@ COLLECT_ERR = re.compile(
     r"ModuleNotFoundError|cannot import name)", re.I)
 
 
+# ---------------------------------------------------------------------- tap
+# `node --test`, `tap` and `ava` all speak TAP. Without this the regex
+# fallback matches nothing, and a suite with real failures parses as zero
+# tests -- which reads as "nothing failed" rather than "nothing was read".
+TAP_LINE = re.compile(r"^\s*(not ok|ok)\s+(\d+)\s*(?:-\s*)?(.*)$", re.M)
+TAP_PLAN = re.compile(r"^\s*1\.\.(\d+)\s*$", re.M)
+TAP_TOTAL = re.compile(r"^#\s*tests\s+(\d+)\s*$", re.M)
+TAP_SKIP = re.compile(r"#\s*(SKIP|TODO)\b", re.I)
+
+
+def looks_like_tap(text: str) -> bool:
+    return bool(TAP_PLAN.search(text) or TAP_TOTAL.search(text)) and \
+        bool(TAP_LINE.search(text))
+
+
+def parse_tap(text: str) -> TestResults:
+    """TAP 13. Ids are the test names, which is what the plan refers to."""
+    res = TestResults(parser="tap", raw_tail=text[-4000:])
+    for m in TAP_LINE.finditer(text):
+        verdict, number, name = m.group(1), m.group(2), (m.group(3) or "").strip()
+        # Nested subtests repeat their parent's numbering; the name is the
+        # stable identifier, so fall back to the number only when unnamed.
+        test_id = name or f"test {number}"
+        if TAP_SKIP.search(name):
+            status = SKIP
+        else:
+            status = FAIL if verdict == "not ok" else PASS
+        # A parent reported after its children must not downgrade a failure
+        # already recorded under the same name.
+        if res.tests.get(test_id) in FAILING and status == PASS:
+            continue
+        res.tests[test_id] = status
+    res.total = len(res.tests)
+
+    declared = TAP_TOTAL.search(text) or TAP_PLAN.search(text)
+    if declared and res.total and int(declared.group(1)) != res.total:
+        # Counted something, but not what the runner said it ran.
+        res.confidence = "low"
+    return res
+
+
+# --------------------------------------------------------------------- spec
+# `node --test` emits TAP on older releases and its "spec" reporter on newer
+# ones (Node 25 defaults to spec). Supporting only TAP meant a suite with
+# real failures parsed as ZERO tests -- "nothing failed" rather than
+# "nothing was read", which is the hazard §9.4 exists to prevent, arriving
+# through a different reporter.
+SPEC_LINE = re.compile(r"^\s*(?:[\u2502\s]*)([\u2714\u2716\u2713\u2717])\s+"
+                       r"(?P<name>.+?)\s*\([\d.]+m?s\)\s*$", re.M)
+SPEC_TOTAL = re.compile(r"^\s*[\u2139i]\s*tests\s+(\d+)\s*$", re.M)
+SPEC_COUNT = re.compile(r"^\s*[\u2139i]\s*(pass|fail|skipped|todo)\s+(\d+)\s*$",
+                        re.M)
+SPEC_PASS_MARKS = "\u2714\u2713"          # heavy and light check marks
+
+
+def looks_like_spec(text: str) -> bool:
+    return bool(SPEC_TOTAL.search(text)) and bool(SPEC_LINE.search(text))
+
+
+def parse_spec(text: str) -> TestResults:
+    """Node's spec reporter. The test name is the id, as it is for TAP."""
+    res = TestResults(parser="node-spec", raw_tail=text[-4000:])
+    for m in SPEC_LINE.finditer(text):
+        name = (m.group("name") or "").strip()
+        if not name:
+            continue
+        status = PASS if m.group(1) in SPEC_PASS_MARKS else FAIL
+        # A suite line repeats its children's mark; never let a later pass
+        # overwrite a failure already recorded under the same name.
+        if res.tests.get(name) in FAILING and status == PASS:
+            continue
+        res.tests[name] = status
+    res.total = len(res.tests)
+
+    declared = SPEC_TOTAL.search(text)
+    if declared and res.total and int(declared.group(1)) != res.total:
+        res.confidence = "low"
+    return res
+
+
 def parse_text(text: str, framework: str = "") -> TestResults:
     """Regex fallback. Always low confidence -- ids may not be stable."""
     res = TestResults(parser=f"regex:{framework or 'generic'}",
@@ -181,6 +261,14 @@ def parse(result, toolchain, junit_path: Path | None = None) -> TestResults:
             return res
     if fw in ("jest", "vitest") and '"testResults"' in combined:
         res = parse_jest_json(combined)
+        if res.total:
+            return res
+    if looks_like_tap(combined):
+        res = parse_tap(combined)
+        if res.total:
+            return res
+    if looks_like_spec(combined):
+        res = parse_spec(combined)
         if res.total:
             return res
 

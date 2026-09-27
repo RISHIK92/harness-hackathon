@@ -26,13 +26,23 @@ def _can_import(interpreter: str, module: str) -> bool:
     import subprocess
     try:
         r = subprocess.run([interpreter, "-c", f"import {module}"],
-                           capture_output=True, timeout=15)
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
         return r.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
 
 def python_interpreter(repo: Path, needs: str = "pytest") -> str:
+    """Inside a container, host paths are meaningless -- a host virtualenv
+    does not exist there, and binding one produces a command that cannot
+    run."""
+    from .runner import active_container
+    if active_container() is not None:
+        return "python3"
+    return _host_python_interpreter(repo, needs)
+
+
+def _host_python_interpreter(repo: Path, needs: str = "pytest") -> str:
     """The interpreter to actually invoke.
 
     Two failures this avoids:
@@ -122,14 +132,27 @@ def _make_targets(repo: Path) -> set[str]:
 
 
 def _pick(cmds: list[str], hints: tuple) -> str | None:
+    """The most canonical command that matches, not the first one seen.
+
+    A CI workflow holds many specialised invocations. Taking the first hit
+    chose `pnpm test:bun:profile --artifact` -- a profiling run -- over the
+    plain `test` script the repository actually defines. The suite has to be
+    the ordinary one, or every verdict is about the wrong thing.
+    """
+    best, best_score = None, None
     for c in cmds:
         low = c.lower()
-        if any(h in low for h in hints):
-            if any(bad in low for bad in ("install", "upgrade", "checkout",
-                                          "setup-python", "actions/")):
-                continue
-            return c
-    return None
+        if not any(h in low for h in hints):
+            continue
+        if any(bad in low for bad in ("install", "upgrade", "checkout",
+                                      "setup-python", "actions/")):
+            continue
+        # Lower is better: a script name qualified with ":" is a variant, and
+        # extra flags mean a special mode rather than "run the tests".
+        score = (low.count(":"), low.count("--"), len(low))
+        if best_score is None or score < best_score:
+            best, best_score = c, score
+    return best
 
 
 def discover_toolchain(repo: Path, cfg=None) -> Toolchain:
@@ -178,6 +201,11 @@ def discover_toolchain(repo: Path, cfg=None) -> Toolchain:
     # 4. language defaults
     _defaults(repo, tc)
 
+    # A command naming a package manager nobody installed never runs. The
+    # repository pins one; corepack ships with Node to provide exactly that.
+    tc.test_cmd = _with_runner(tc.test_cmd)
+    tc.lint_cmd = _with_runner(tc.lint_cmd)
+
     # 5. bind a real interpreter -- "python" may not exist on the eval machine
     if tc.language == "python":
         tc.python = python_interpreter(repo)
@@ -214,9 +242,14 @@ def _language(repo: Path) -> tuple[str, str]:
         return "php", "phpunit"
     if (repo / "package.json").is_file():
         body = _read(repo / "package.json")
+        # An empty framework means "none found", which is a fact worth
+        # reporting. Calling it "node" turns it into `npx node` -- a REPL
+        # that waits on stdin forever instead of running any test.
         fw = ("vitest" if "vitest" in body else
               "jest" if "jest" in body else
-              "mocha" if "mocha" in body else "node")
+              "mocha" if "mocha" in body else
+              "tap" if '"tap"' in body else
+              "ava" if '"ava"' in body else "")
         lang = "typescript" if (repo / "tsconfig.json").is_file() else "javascript"
         return lang, fw
     if any((repo / f).is_file() for f in ("pyproject.toml", "setup.py",
@@ -226,6 +259,19 @@ def _language(repo: Path) -> tuple[str, str]:
     if list(repo.glob("**/*.py"))[:1]:
         return "python", "pytest"
     return "unknown", ""
+
+
+def _with_runner(cmd: str | None) -> str | None:
+    """Rewrite a leading `pnpm`/`yarn` to `corepack <tool>` when missing."""
+    if not cmd:
+        return cmd
+    head = cmd.split(None, 1)[0]
+    if head not in ("pnpm", "yarn", "bun"):
+        return cmd
+    import shutil
+    if shutil.which(head) or not shutil.which("corepack"):
+        return cmd
+    return f"corepack {cmd}"
 
 
 def _defaults(repo: Path, tc: Toolchain) -> None:
@@ -262,9 +308,9 @@ def _defaults(repo: Path, tc: Toolchain) -> None:
             tc.lint_cmd, tc.lint_source = "cargo clippy", "config"
 
     elif lang in ("javascript", "typescript"):
-        if not tc.test_cmd:
-            tc.test_cmd = f"npx {tc.framework} --run" if tc.framework == "vitest" \
-                else f"npx {tc.framework}"
+        if not tc.test_cmd and tc.framework:
+            tc.test_cmd = f"npx {tc.framework} --run" \
+                if tc.framework == "vitest" else f"npx {tc.framework}"
             tc.test_source = "devDependency"
         if not tc.lint_cmd:
             if (repo / ".eslintrc.json").is_file() or \
