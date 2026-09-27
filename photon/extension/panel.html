@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Photon Whisper</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <header>
+    <span class="brand">photon</span>
+    <span id="status" class="status">…</span>
+  </header>
+
+  <section id="pair" hidden>
+    <h1>Connect to Photon</h1>
+    <p class="muted">In Photon, open <b>My agent → Meet extension</b> and make a pairing code.
+      Paste it here with the address shown next to it.</p>
+    <label>Photon address<input id="apiBase" placeholder="http://localhost:8000" /></label>
+    <label>Pairing code<input id="code" placeholder="ABCD-EFGH" autocomplete="off" /></label>
+    <button id="pairBtn">Connect</button>
+    <p id="pairError" class="error" hidden></p>
+  </section>
+
+  <section id="notMeet" hidden>
+    <h1>Open a Google Meet call</h1>
+    <p class="muted">Photon reads the call's live captions and suggests answers here, privately.
+      No bot joins the meeting.</p>
+  </section>
+
+  <section id="meet" hidden>
+    <div id="captionsOff" class="warn" hidden>
+      Captions are off. Turn them on in Meet (the <b>CC</b> button, or press <kbd>c</kbd>) —
+      that is what Photon listens through.
+    </div>
+    <p class="consent muted">Only you see this panel. Let the others know you're using an AI notetaker.</p>
+    <ol id="messages"></ol>
+    <p id="empty" class="muted">Listening. When the client asks something, a suggested answer appears here.</p>
+    <form id="askForm">
+      <input id="ask" placeholder="Ask Photon privately…" autocomplete="off" />
+    </form>
+  </section>
+
+  <footer id="footer" hidden>
+    <span id="who"></span>
+    <button id="unpair" class="link">disconnect</button>
+  </footer>
+
+  <script src="panel.js"></script>
+</body>
+</html>

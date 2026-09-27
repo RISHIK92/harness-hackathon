@@ -1,0 +1,14 @@
+# Separate venv from server/ — deliberately. livekit-api pulls a protobuf
+# version that conflicts with google-ai-generativelanguage in server/.venv
+# (see CLAUDE.md). This service and the brain-api only ever talk over
+# plain HTTP, so there's no reason to share a Python environment.
+livekit==1.1.14
+livekit-agents[deepgram,silero]~=1.7
+httpx==0.28.1
+pillow==12.3.0
+python-dotenv==1.2.3
+structlog==26.1.0
+
+# Optional — only needed when VOICE_STACK=sarvam (Indic STT/TTS). The
+# adapter imports it lazily, so the default Deepgram stack runs without it.
+livekit-plugins-sarvam

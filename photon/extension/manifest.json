@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Photon Whisper for Google Meet",
+  "version": "0.1.0",
+  "description": "Private, cited answer suggestions beside your Google Meet — no bot joins the call.",
+  "permissions": ["storage", "sidePanel"],
+  "host_permissions": ["https://meet.google.com/*"],
+  "optional_host_permissions": ["http://localhost/*", "http://127.0.0.1/*", "https://*/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "content_scripts": [
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["captions.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": { "default_path": "panel.html" },
+  "action": { "default_title": "Photon Whisper" }
+}

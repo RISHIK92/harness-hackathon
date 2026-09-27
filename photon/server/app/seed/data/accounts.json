@@ -1,0 +1,47 @@
+[
+  {
+    "id": "acct_northwind",
+    "name": "Northwind Logistics",
+    "tier": "standard",
+    "home_city": "Mumbai",
+    "webhook_url": "https://hooks.northwindlogistics.com/meridian",
+    "webhook_enabled": true,
+    "webhook_signing_secret_current": "whsec_9f2a7c1d3b4e5061",
+    "webhook_signing_secret_history": [
+      {
+        "secret": "whsec_1a2b3c4d5e6f7081",
+        "rotated_out_at": "2026-08-14T09:12:00Z"
+      }
+    ],
+    "webhook_signing_secret_note": "Endpoint has NOT updated to whsec_9f2a7c1d3b4e5061 as of 2026-08-22 \u2014 still verifying with the rotated-out secret, per delivery log.",
+    "open_tickets": [
+      "MER-441"
+    ],
+    "created_at": "2025-09-02T00:00:00Z"
+  },
+  {
+    "id": "acct_calico",
+    "name": "Calico Transit",
+    "tier": "partner",
+    "home_city": "Bangalore",
+    "webhook_url": "https://api.calicotransit.example/webhooks/meridian",
+    "webhook_enabled": true,
+    "webhook_signing_secret_current": "whsec_c4e1f9a2b8d3e6f0",
+    "webhook_signing_secret_history": [],
+    "open_tickets": [],
+    "created_at": "2026-03-25T00:00:00Z",
+    "partner_agreement": "BLR Mobility Partners reseller agreement (MER-412), Bangalore only, 0.88x commission"
+  },
+  {
+    "id": "acct_orion",
+    "name": "Orion Health",
+    "tier": "enterprise",
+    "home_city": "Singapore",
+    "webhook_url": "https://integrations.orionhealth.example/hooks/meridian",
+    "webhook_enabled": true,
+    "webhook_signing_secret_current": "whsec_5d8e2f1a9c3b7042",
+    "webhook_signing_secret_history": [],
+    "open_tickets": [],
+    "created_at": "2025-11-15T00:00:00Z"
+  }
+]

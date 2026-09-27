@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Settings · Integrations — Meridian</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f8fa; color: #1a1d23; }
+  .topbar { display: flex; align-items: center; gap: 12px; padding: 14px 24px; background: #fff; border-bottom: 1px solid #e4e7ec; }
+  .logo { width: 24px; height: 24px; border-radius: 6px; background: linear-gradient(135deg,#4f46e5,#7c3aed); }
+  .brand { font-weight: 600; }
+  .crumb { color: #8a94a6; font-size: 13px; margin-left: 8px; }
+  .layout { display: flex; max-width: 1080px; margin: 0 auto; }
+  nav { width: 220px; padding: 24px 12px; }
+  nav a { display: block; padding: 8px 12px; border-radius: 8px; color: #4b5565; text-decoration: none; font-size: 14px; margin-bottom: 2px; }
+  nav a.active { background: #eef0ff; color: #4338ca; font-weight: 600; }
+  main { flex: 1; padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #6b7280; font-size: 14px; margin-bottom: 24px; }
+  .card { background: #fff; border: 1px solid #e4e7ec; border-radius: 10px; padding: 18px 20px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; }
+  .card h3 { margin: 0 0 4px; font-size: 15px; }
+  .card p { margin: 0; color: #6b7280; font-size: 13px; }
+  .badge { font-size: 12px; padding: 3px 9px; border-radius: 999px; font-weight: 600; }
+  .badge.on { background: #dcfce7; color: #166534; }
+  .badge.off { background: #f1f2f4; color: #6b7280; }
+  a.link { color: #4338ca; text-decoration: none; font-size: 13px; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="logo"></div>
+    <div class="brand">Meridian</div>
+    <div class="crumb">Settings / Integrations</div>
+  </div>
+  <div class="layout">
+    <nav>
+      <a href="#">General</a>
+      <a href="#">Team</a>
+      <a class="active" href="#">Integrations</a>
+      <a href="#">Billing</a>
+      <a href="#">API Keys</a>
+    </nav>
+    <main>
+      <h1>Integrations</h1>
+      <div class="sub">Connect Meridian to your systems.</div>
+
+      <div class="card">
+        <div>
+          <h3>Webhooks</h3>
+          <p>Get notified when bookings and payments change status.</p>
+        </div>
+        <div style="display:flex; align-items:center; gap:14px;">
+          <span class="badge on">Enabled</span>
+          <a class="link" href="./signing.html">Manage →</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <div>
+          <h3>API Keys</h3>
+          <p>Server-to-server access for your integration.</p>
+        </div>
+        <div style="display:flex; align-items:center; gap:14px;">
+          <span class="badge on">2 active keys</span>
+          <a class="link" href="#">Manage →</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <div>
+          <h3>Single Sign-On</h3>
+          <p>SAML-based SSO for your team.</p>
+        </div>
+        <div style="display:flex; align-items:center; gap:14px;">
+          <span class="badge off">Not connected</span>
+          <a class="link" href="#">Set up →</a>
+        </div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Settings · Webhooks · Signing — Meridian</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f8fa; color: #1a1d23; }
+  .topbar { display: flex; align-items: center; gap: 12px; padding: 14px 24px; background: #fff; border-bottom: 1px solid #e4e7ec; }
+  .logo { width: 24px; height: 24px; border-radius: 6px; background: linear-gradient(135deg,#4f46e5,#7c3aed); }
+  .brand { font-weight: 600; }
+  .crumb { color: #8a94a6; font-size: 13px; margin-left: 8px; }
+  .layout { display: flex; max-width: 1080px; margin: 0 auto; }
+  nav { width: 220px; padding: 24px 12px; }
+  nav a { display: block; padding: 8px 12px; border-radius: 8px; color: #4b5565; text-decoration: none; font-size: 14px; margin-bottom: 2px; }
+  nav a.active { background: #eef0ff; color: #4338ca; font-weight: 600; }
+  main { flex: 1; padding: 24px; max-width: 640px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #6b7280; font-size: 14px; margin-bottom: 24px; }
+  .card { background: #fff; border: 1px solid #e4e7ec; border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+  .card h3 { margin: 0 0 12px; font-size: 15px; }
+  .row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #f1f2f4; font-size: 14px; }
+  .row:last-child { border-bottom: none; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: #4b5565; background: #f7f8fa; padding: 2px 8px; border-radius: 6px; }
+  .btn { background: #1a1d23; color: #fff; border: none; padding: 9px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .btn.danger { background: #fff; color: #dc2626; border: 1px solid #f3d0d0; }
+  .warn { background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; font-size: 13px; padding: 12px 14px; border-radius: 8px; margin-top: 12px; }
+  .actions { display: flex; gap: 10px; margin-top: 16px; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="logo"></div>
+    <div class="brand">Meridian</div>
+    <div class="crumb">Settings / Integrations / Webhooks / Signing</div>
+  </div>
+  <div class="layout">
+    <nav>
+      <a href="./integrations.html">Integrations</a>
+      <a class="active" href="#">Webhooks</a>
+    </nav>
+    <main>
+      <h1>Signing secret</h1>
+      <div class="sub">Used to verify that webhook deliveries came from Meridian.</div>
+
+      <div class="card">
+        <h3>Current secret</h3>
+        <div class="row">
+          <span>Endpoint</span>
+          <span class="mono">https://hooks.northwindlogistics.com/meridian</span>
+        </div>
+        <div class="row">
+          <span>Signing secret</span>
+          <span class="mono">whsec_9f2a•••••••••e5061</span>
+        </div>
+        <div class="row">
+          <span>Last rotated</span>
+          <span>Aug 14, 2026 · 09:12 UTC</span>
+        </div>
+        <div class="actions">
+          <button class="btn">Rotate secret</button>
+          <button class="btn danger">Copy full secret</button>
+        </div>
+        <div class="warn">
+          Rotating immediately invalidates the previous secret. There is no
+          overlap window — update your endpoint's stored secret at the same
+          time you rotate, or deliveries will fail signature verification
+          until you do.
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Recent delivery log</h3>
+        <div class="row"><span>booking.completed</span><span style="color:#dc2626;font-weight:600;">401</span></div>
+        <div class="row"><span>booking.completed</span><span style="color:#dc2626;font-weight:600;">401</span></div>
+        <div class="row"><span>payment.settled</span><span style="color:#dc2626;font-weight:600;">401</span></div>
+        <div class="row"><span>booking.completed</span><span style="color:#dc2626;font-weight:600;">401</span></div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

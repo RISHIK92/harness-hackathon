@@ -1,0 +1,6 @@
+{
+  "JEE Main": { "durationInMinutes": 180, "totalQuestions": 90 },
+  "JEE Advanced": { "durationInMinutes": 360, "totalQuestions": 108 },
+  "NEET UG": { "durationInMinutes": 200, "totalQuestions": 180 },
+  "Default": { "durationInMinutes": 180, "totalQuestions": 90 }
+}
