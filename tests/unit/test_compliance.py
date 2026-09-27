@@ -156,3 +156,73 @@ def test_no_bare_except_pass():
             if "except Exception" in m.group(0) and "#" not in m.group(0):
                 offenders.append(f"{p.name}:{line}")
     assert not offenders, offenders
+
+
+# ---------------------------------------------------------------------------
+# `make run ISSUE=... PR=True` -- the one-line way to say "and open the PR".
+# ---------------------------------------------------------------------------
+
+def _makefile() -> str:
+    return (Path(__file__).resolve().parents[2] / "Makefile").read_text()
+
+
+def test_pr_true_allows_pushing_and_opening():
+    body = _makefile()
+    assert "clone,install,push,pr" in body, "PR=True cannot open a PR"
+
+
+def test_pr_false_allows_no_outward_write():
+    """It must still clone and install -- that is how the repository gets
+    read and run at all -- but never push."""
+    body = _makefile()
+    assert "clone,install\"" in body or "clone,install'" in body \
+        or 'HARNESS_AUTO="clone,install"' in body
+    lines = [ln for ln in body.splitlines() if 'HARNESS_AUTO="clone,install"' in ln]
+    assert lines, "PR=False sets no policy"
+    for ln in lines:
+        assert "push" not in ln and ",pr" not in ln, \
+            f"PR=False would still push: {ln.strip()}"
+
+
+def test_an_unrecognised_pr_value_is_refused_not_guessed():
+    body = _makefile()
+    assert "PR must be True or False" in body, \
+        "a typo in PR would silently pick a behaviour"
+
+
+def test_leaving_pr_unset_changes_nothing():
+    """The default is the consent gate: ask at a terminal, decline when
+    unattended. Setting a policy here would take that decision away."""
+    body = _makefile()
+    run = body[body.index("\nrun:"):body.index("\ntest:")]
+    unset = [ln for ln in run.splitlines() if ln.strip().startswith('"")')]
+    assert unset, "no branch for an unset PR"
+    idx = run.index('"")')
+    assert "HARNESS_AUTO" not in run[idx:idx + 120], \
+        "an unset PR must not impose a policy"
+
+
+def test_the_live_env_flag_reaches_the_harness():
+    """The Makefile announced LIVE_ENV=True while exporting a variable by
+    another name, so the flag printed a message and changed nothing."""
+    body = _makefile()
+    assert "HARNESS_LIVE_ENV=1" in body, "the flag exports the wrong name"
+    assert "$(LIVE_ENV)" in body
+    assert "LIVE_ENV must be True or False" in body
+
+
+def test_preparing_the_machine_is_opt_in():
+    """Cloning and editing needs nothing installed."""
+    from harness import provision
+    import os
+    os.environ.pop("HARNESS_LIVE_ENV", None)
+    assert not provision.use_environment()
+
+
+def test_setup_tells_the_operator_how_to_run_it():
+    """`make setup` is where somebody meets this tool."""
+    from harness import setup_ui
+    source = Path(setup_ui.__file__).read_text()
+    assert "PR=True" in source
+    assert "github.com/owner/repo/issues" in source
+    assert "AI_API_KEY" in source

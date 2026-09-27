@@ -19,6 +19,9 @@ KINDS = (
     "phase_start", "phase_end", "model_request", "model_reply",
     "tool_call", "tool_result", "edit_applied", "test_run", "judge",
     "degradation", "checkpoint", "condensation",
+    # Setting up the working copy, writing a test of our own, and the one
+    # question the harness is allowed to ask.
+    "dependencies", "repro_written", "repro", "clarified",
 )
 
 

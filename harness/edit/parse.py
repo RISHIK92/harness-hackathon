@@ -19,6 +19,17 @@ class EditParseError(Exception):
 
 FENCE = re.compile(r"^\s*```[\w]*\s*$", re.M)
 
+# Path operations. Recognised whatever the edit format is, because they are
+# about paths rather than about how a file's contents are expressed.
+CREATE_BLOCK = re.compile(
+    r"<{5,9}\s*CREATE\s+(?P<path>\S+)[^\n]*\n(?P<body>.*?)\n?>{5,9}[^\n]*",
+    re.S)
+DELETE_BLOCK = re.compile(
+    r"<{5,9}\s*DELETE\s+(?P<path>\S+)[^\n]*\n?\s*>{5,9}[^\n]*", re.S)
+RENAME_BLOCK = re.compile(
+    r"<{5,9}\s*RENAME\s+(?P<path>\S+)\s*(?:->|=>|\s)\s*(?P<dest>\S+)"
+    r"[^\n]*\n?\s*>{5,9}[^\n]*", re.S)
+
 SR_BLOCK = re.compile(
     r"<{5,9}\s*SEARCH\s*(?P<path>[^\n]*)\n(?P<search>.*?)\n?"
     r"={5,9}\s*\n(?P<replace>.*?)\n?>{5,9}\s*(?:REPLACE)?[^\n]*",
@@ -45,6 +56,10 @@ def parse(text: str, fmt: str, default_path: str = "",
         raise EditParseError("empty reply")
     body = strip_fences(text)
 
+    # Path operations first, and removed from the body, so a CREATE block is
+    # never also read as a content edit to a file that does not exist.
+    ops, body = _parse_file_ops(body)
+
     if fmt == SEARCH_REPLACE:
         edits = _parse_sr(body, default_path)
     elif fmt == LINE_RANGE:
@@ -52,9 +67,35 @@ def parse(text: str, fmt: str, default_path: str = "",
     else:
         edits = _parse_file(body, default_path)
 
-    if not edits:
+    if not edits and not ops:
         raise EditParseError(f"no {fmt} block found", text)
-    return edits
+    return ops + edits
+
+
+def _parse_file_ops(body: str) -> tuple[list, str]:
+    """Pull CREATE / DELETE / RENAME out of the reply.
+
+    Returns the operations and the body with them removed, so the remaining
+    text can be parsed as ordinary content edits.
+    """
+    from .formats import CREATE, DELETE, RENAME, WHOLE_FILE
+    ops: list[Edit] = []
+    for pattern, kind in ((RENAME_BLOCK, RENAME), (CREATE_BLOCK, CREATE),
+                          (DELETE_BLOCK, DELETE)):
+        for m in pattern.finditer(body):
+            path = _clean_path(m.group("path"), "")
+            if not path:
+                continue
+            edit = Edit(path=path, fmt=WHOLE_FILE, op=kind)
+            if kind == CREATE:
+                edit.replace = m.group("body")
+            elif kind == RENAME:
+                edit.dest = _clean_path(m.group("dest"), "")
+                if not edit.dest:
+                    continue
+            ops.append(edit)
+        body = pattern.sub("", body)
+    return ops, body
 
 
 def _clean_path(raw: str, default: str) -> str:

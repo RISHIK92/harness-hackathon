@@ -235,6 +235,33 @@ class Investigation:
                 break
 
         rec = self._synthesize(issue, sbfl, route, external, hypotheses=hyps)
+
+        # Looking again when the answer is weak.
+        #
+        # The loop above only re-opens the investigation when every
+        # hypothesis was refuted. A confirmed-but-unconvincing answer used to
+        # be final, which is the case where a human would go and read one
+        # more file. So: one further round of model-chosen checks, executed
+        # by the harness as before, and a re-synthesis on the wider evidence.
+        if rec.confidence == "low" and c.budget_ok("P1") \
+                and _extra_rounds() > 0:
+            c.log.line("root cause is weakly supported; looking further")
+            more = self._propose(issue, sbfl, route, 2, refuted=hyps)
+            for h in more:
+                if h.support != "untested":
+                    continue
+                h.result, h.support = self._execute(h)
+                c.log.step({"confirmed": "ok", "refuted": "bad"}.get(
+                    h.support, "computed"), h.id, h.statement[:60],
+                    plain=f"{h.id} {h.statement[:56]}")
+                self.evidence.append(Evidence(
+                    "grep" if h.check.kind == "grep" else h.check.kind,
+                    f"{h.id}: {h.statement[:80]} -> {h.support}"))
+            if any(h.support == "confirmed" for h in more):
+                hyps = hyps + more
+                rec = self._synthesize(issue, sbfl, route, external,
+                                       hypotheses=hyps)
+
         rec.hypotheses = hyps
         rec.alternatives_rejected = [
             {"id": h.id, "reason": (h.result or "refuted")[:160]}
@@ -351,9 +378,23 @@ class Investigation:
             parts.append("Hypotheses and their verdicts:\n"
                          + "\n".join(h.render() for h in hypotheses))
         if oracle:
-            parts.append(f"A failing test reproduces the issue: {oracle.test_id}")
+            parts.append(f"A failing test reproduces the issue: "
+                         f"{oracle.test_id}")
         if sbfl.ok:
             parts.append("Most suspicious lines:\n" + sbfl.render())
+        # Synthesis was never shown the candidate files. On the oracle route
+        # without coverage -- every non-Python repository -- the only
+        # location it had was the name of a failing TEST, so it named the
+        # test file as the root cause. That reads as low confidence, and a
+        # correct fix is then reported PARTIAL for want of a file name.
+        if route is not None and getattr(route, "candidates", None):
+            parts.append(
+                "Candidate source files, ranked (the code under test, not "
+                "the tests themselves):\n"
+                + "\n".join(f"  {i + 1}. {p}"
+                             for i, p in enumerate(route.candidates[:6]))
+                + "\n\nName one of these as the location. A test file is "
+                  "never the root cause: it is where the bug was observed.")
         parts.append(SYNTHESIS_PROMPT.format(classes=" | ".join(BUG_CLASSES)))
 
         messages = [
@@ -414,6 +455,20 @@ class Investigation:
                              f"{sbfl.lines[0].path}:{sbfl.lines[0].line}")
             rec.confidence = "low"
         return rec
+
+
+def _extra_rounds() -> int:
+    """HARNESS_EXPLORE_ROUNDS: how many times to look again on a weak answer.
+
+    One by default. Zero restores the previous behaviour; the cap keeps a
+    vague issue from spending the whole budget on investigation.
+    """
+    import os
+    raw = (os.environ.get("HARNESS_EXPLORE_ROUNDS") or "").strip()
+    try:
+        return max(0, min(3, int(raw))) if raw else 1
+    except ValueError:
+        return 1
 
 
 def _norm_class(value, external) -> str:

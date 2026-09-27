@@ -17,6 +17,15 @@ ORDER = (SEARCH_REPLACE, LINE_RANGE, WHOLE_FILE)
 WHOLE_FILE_MAX_LINES = 150
 
 
+# What an edit does to a path. Changing a file is by far the common case, but
+# a fix that needs a new module -- or that removes a dead one -- is ordinary
+# work, and a harness that cannot do it hands the job back to a human.
+EDIT = "edit"
+CREATE = "create"
+DELETE = "delete"
+RENAME = "rename"
+
+
 @dataclass
 class Edit:
     """One change to one file."""
@@ -26,8 +35,16 @@ class Edit:
     replace: str = ""         # SEARCH_REPLACE / LINE_RANGE / WHOLE_FILE
     start: int = 0            # LINE_RANGE, 1-indexed inclusive
     end: int = 0
+    op: str = EDIT
+    dest: str = ""            # RENAME target
 
     def summary(self) -> str:
+        if self.op == CREATE:
+            return f"CREATE {self.path}"
+        if self.op == DELETE:
+            return f"DELETE {self.path}"
+        if self.op == RENAME:
+            return f"RENAME {self.path} -> {self.dest}"
         where = self.path
         if self.fmt == LINE_RANGE:
             where += f":{self.start}-{self.end}"
@@ -89,6 +106,23 @@ Emit the complete file contents, unchanged except for your fix:
 
 Emit nothing else.""",
 }
+
+# Available in every format, because they are about paths, not about how a
+# file's contents are expressed.
+FILE_OPS = """\
+To add, remove or move a file, use one of these instead:
+
+<<<<<<< CREATE path/to/new_file.ext
+(the entire contents of the new file)
+>>>>>>>
+
+<<<<<<< DELETE path/to/old_file.ext
+>>>>>>>
+
+<<<<<<< RENAME old/path.ext -> new/path.ext
+>>>>>>>
+
+Only create a file when the fix genuinely needs one."""
 
 
 def instructions(fmt: str, path: str = "<path>", start: int = 0,

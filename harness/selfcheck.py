@@ -15,7 +15,7 @@ REQUIRED_PY = (3, 10)
 
 def _cmd_ok(cmd: list[str]) -> bool:
     try:
-        subprocess.run(cmd, capture_output=True, timeout=5, check=False)
+        subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=5, check=False)
         return True
     except (OSError, subprocess.SubprocessError):
         return False

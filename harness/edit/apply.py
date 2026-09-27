@@ -11,7 +11,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .formats import LINE_RANGE, SEARCH_REPLACE, WHOLE_FILE, Edit
+from .formats import (CREATE, DELETE, EDIT, LINE_RANGE, RENAME,
+                      SEARCH_REPLACE, WHOLE_FILE, Edit)
 
 FUZZ_THRESHOLD = 0.92
 
@@ -51,6 +52,9 @@ class Applied:
     after: str
     added: int
     removed: int
+    op: str = EDIT
+    existed: bool = True      # so a rollback knows whether to delete
+    dest: str = ""
 
 
 def locate(haystack: str, needle: str) -> tuple[int, int]:
@@ -174,13 +178,35 @@ def _ensure_newline(text: str) -> str:
 def apply_all(repo: Path, edits: list[Edit]) -> list[Applied]:
     """Stage every edit in memory, then write. Atomic across files."""
     staged: dict[str, tuple[str, str]] = {}
+    ops: list[Applied] = []
+
+    # Path operations are staged first and separately: they decide whether a
+    # file exists at all, which every content edit below then depends on.
+    content = []
     for i, edit in enumerate(edits):
+        if edit.op == EDIT:
+            content.append((i, edit))
+            continue
+        ops.append(_stage_path_op(repo, edit, i))
+
+    created = {a.path for a in ops if a.op == CREATE}
+    renamed = {a.dest for a in ops if a.op == RENAME}
+
+    for i, edit in content:
         target = Path(repo) / edit.path
-        if not target.is_file():
+        # A file created in the same reply is a legitimate edit target, even
+        # though it is not on disk yet.
+        if not target.is_file() and edit.path not in created \
+                and edit.path not in renamed:
             raise EditFailure("apply", f"{edit.path} does not exist",
                               hunk_index=i, path=edit.path)
-        before = staged[edit.path][1] if edit.path in staged else \
-            target.read_text("utf-8", errors="replace")
+        if edit.path in staged:
+            before = staged[edit.path][1]
+        elif target.is_file():
+            before = target.read_text("utf-8", errors="replace")
+        else:
+            before = next((a.after for a in ops
+                           if edit.path in (a.path, a.dest)), "")
         original = staged[edit.path][0] if edit.path in staged else before
         try:
             after = render(edit, before)
@@ -190,19 +216,83 @@ def apply_all(repo: Path, edits: list[Edit]) -> list[Applied]:
             raise
         staged[edit.path] = (original, after)
 
-    out = []
+    out = list(ops)
+    for a in ops:
+        _commit_path_op(repo, a)
     for path, (before, after) in staged.items():
         target = Path(repo) / path
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(after, encoding="utf-8")
         added, removed = _count(before, after)
         out.append(Applied(path, before, after, added, removed))
     return out
 
 
+def _stage_path_op(repo: Path, edit: Edit, index: int) -> Applied:
+    """Validate a create/delete/rename without touching the disk yet."""
+    target = Path(repo) / edit.path
+    if edit.op == CREATE:
+        if target.is_file():
+            # Creating over an existing file loses its contents silently.
+            raise EditFailure("apply", f"{edit.path} already exists; edit it "
+                                       f"instead of creating it",
+                              hunk_index=index, path=edit.path)
+        body = _ensure_newline(edit.replace)
+        return Applied(edit.path, "", body, len(body.splitlines()), 0,
+                       op=CREATE, existed=False)
+
+    if edit.op == DELETE:
+        if not target.is_file():
+            raise EditFailure("apply", f"{edit.path} does not exist",
+                              hunk_index=index, path=edit.path)
+        before = target.read_text("utf-8", errors="replace")
+        return Applied(edit.path, before, "", 0, len(before.splitlines()),
+                       op=DELETE)
+
+    if edit.op == RENAME:
+        if not target.is_file():
+            raise EditFailure("apply", f"{edit.path} does not exist",
+                              hunk_index=index, path=edit.path)
+        if (Path(repo) / edit.dest).exists():
+            raise EditFailure("apply", f"{edit.dest} already exists",
+                              hunk_index=index, path=edit.path)
+        before = target.read_text("utf-8", errors="replace")
+        return Applied(edit.path, before, before, 0, 0, op=RENAME,
+                       dest=edit.dest)
+
+    raise EditFailure("apply", f"unknown operation {edit.op!r}",
+                      hunk_index=index, path=edit.path)
+
+
+def _commit_path_op(repo: Path, a: Applied) -> None:
+    target = Path(repo) / a.path
+    if a.op == CREATE:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(a.after, encoding="utf-8")
+    elif a.op == DELETE:
+        target.unlink(missing_ok=True)
+    elif a.op == RENAME:
+        dest = Path(repo) / a.dest
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        target.rename(dest)
+
+
 def rollback(repo: Path, applied: list[Applied]) -> None:
-    for a in applied:
+    """Undo in reverse, so a rename is put back before its old path is
+    rewritten."""
+    for a in reversed(applied):
         try:
-            (Path(repo) / a.path).write_text(a.before, encoding="utf-8")
+            target = Path(repo) / a.path
+            if a.op == RENAME:
+                moved = Path(repo) / a.dest
+                if moved.is_file():
+                    moved.rename(target)
+                continue
+            if a.op == CREATE or not a.existed:
+                target.unlink(missing_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(a.before, encoding="utf-8")
         except OSError:
             pass
 

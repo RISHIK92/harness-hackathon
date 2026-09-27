@@ -52,6 +52,18 @@ def scope_check(applied: list[Applied], plan) -> None:
     """A write outside the plan is reverted, not warned about."""
     allowed, forbidden = plan.allowed, plan.forbidden
     for a in applied:
+        # A rename touches two paths, and the destination is the one that
+        # survives -- checking only the source would let a file be moved
+        # anywhere at all.
+        dest = getattr(a, "dest", "")
+        if dest:
+            if dest in forbidden:
+                raise EditFailure("scope", f"{dest} is on the must-not-change "
+                                           f"list.", path=dest)
+            if allowed and dest not in allowed:
+                raise EditFailure(
+                    "scope", f"{dest} is not in the plan "
+                             f"({', '.join(sorted(allowed)[:3])}).", path=dest)
         if a.path in forbidden:
             raise EditFailure(
                 "scope", f"{a.path} is on the must-not-change list.",

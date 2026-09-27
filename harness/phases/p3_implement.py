@@ -56,6 +56,15 @@ OUTPUT FORMAT:
 {output_format}"""
 
 
+def _plan_has_new_files(plan) -> bool:
+    """Only offer the file operations when the plan actually calls for one.
+
+    Showing them unconditionally invites a model to create a file instead of
+    making the small edit that was asked for.
+    """
+    return any(getattr(fi, "is_new", False) for fi in plan.files_to_change)
+
+
 class Implementation:
     def __init__(self, ctx) -> None:
         self.ctx = ctx
@@ -189,7 +198,8 @@ class Implementation:
             forbidden=", ".join(sorted(plan.forbidden)[:4]) or "tests/",
             cap=int(plan.estimated_lines_changed * 1.3),
             imports=imports_block(full) or "(none)",
-            output_format=F.instructions(fmt, path, span[0], span[1]),
+            output_format=F.instructions(fmt, path, span[0], span[1])
+            + (f"\n\n{F.FILE_OPS}" if _plan_has_new_files(plan) else ""),
         )
         if feedback:
             body += f"\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED:\n{feedback}"

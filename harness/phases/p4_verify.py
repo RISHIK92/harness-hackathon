@@ -25,6 +25,8 @@ class VerifyResult:
     scoped: CL.Classification = None
     full: CL.Classification = None
     oracle_passes: bool | None = None
+    oracle_id: str = ""
+    oracle_output: str = ""
     judge: DiffVerdict = field(default_factory=DiffVerdict)
     practices: object = None
     ran_full: bool = False
@@ -82,7 +84,12 @@ class Verifier:
 
         # oracle: the single test the issue is about
         if oracle:
-            res.oracle_passes = self._run_one(oracle.test_id)
+            res.oracle_id = oracle.test_id
+            # Keep what the test actually said. "The oracle still fails" tells
+            # the implementer nothing; the assertion tells it the bound it got
+            # wrong -- that 95 must count as completed, not only 100.
+            res.oracle_passes, res.oracle_output = self._run_one_verbose(
+                oracle.test_id)
             short = oracle.test_id.split("::")[-1]
             verdict = "PASS" if res.oracle_passes else "FAIL"
             (c.log.ok if res.oracle_passes else c.log.fail)(
@@ -115,9 +122,10 @@ class Verifier:
                 c.log.computed("full suite", "pre-submission gate",
                            plain="full suite (pre-submission gate)")
                 res.full = self._run_and_classify("")
-                res.ran_full = True
+                res.ran_full = res.full is not None
                 self.full_runs += 1
-                self._report(res.full)
+                if res.full is not None:
+                    self._report(res.full)
                 if res.full and res.full.blocking:
                     res.stage = "full"
                     return res
@@ -146,6 +154,8 @@ class Verifier:
 
     def _run_and_classify(self, selector: str):
         c = self.ctx
+        if not c.toolchain.test_cmd:
+            return None            # no suite: G2/G3 do not apply
         junit = c.cfg.work_dir / "run" / "current-junit.xml"
         cmd = self._test_cmd(selector)
         if c.toolchain.junit_flag:
@@ -163,6 +173,15 @@ class Verifier:
 
     def _run_one(self, test_id: str) -> bool:
         return not self._run_one_fails(test_id)
+
+    def _run_one_verbose(self, test_id: str):
+        """(passed, output) for a single test."""
+        c = self.ctx
+        selector = _selector_for(test_id, c.toolchain)
+        result = run(self._test_cmd(selector), c.repo, timeout=120,
+                     check_deny=False)
+        text = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+        return result.exit_code == 0, text[-1500:]
 
     def _run_one_fails(self, test_id: str) -> bool:
         """True when the test still fails in isolation."""

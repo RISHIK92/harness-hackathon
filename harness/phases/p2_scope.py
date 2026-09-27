@@ -30,8 +30,8 @@ cannot touch anything outside it.
 
 Reply with ONLY this JSON:
 {{"fix_description": "one paragraph of plain English",
- "files_to_change": [{{"path": "<an existing repository path>", "symbol": "function name or null",
-                      "intent": "what changes here"}}],
+ "files_to_change": [{{"path": "<a repository path>", "symbol": "function name or null",
+                      "intent": "what changes here", "new_file": false}}],
  "files_must_not_change": ["..."],
  "interface_changes": true or false,
  "estimated_lines_changed": <integer>,
@@ -39,7 +39,10 @@ Reply with ONLY this JSON:
 
 Constraints:
 - {limit}
-- Name only files that exist.
+- Name files that exist, unless the fix genuinely needs a new one: then give
+  the path it should have and set "new_file": true. Prefer editing an
+  existing file; a new module is for when there is nowhere sensible to put
+  the code.
 - Never list a test file, lockfile, or generated file under files_to_change.
 - estimated_lines_changed is the total of added plus removed lines."""
 
@@ -120,7 +123,8 @@ def _plan_from(data: dict, root_cause, suspects: list[str]) -> ChangePlan:
             plan.files_to_change.append(FileIntent(
                 str(raw["path"]).lstrip("./"),
                 (str(raw["symbol"]) if raw.get("symbol") else None),
-                str(raw.get("intent", ""))[:200]))
+                str(raw.get("intent", ""))[:200],
+                is_new=bool(raw.get("new_file"))))
         elif isinstance(raw, str):
             plan.files_to_change.append(FileIntent(raw.lstrip("./")))
     plan.files_must_not_change = [str(p).lstrip("./") for p in
@@ -137,6 +141,16 @@ def _int(value, default: int) -> int:
         return default
 
 
+def _plausible_new_path(path: str) -> bool:
+    """A new path must be relative, inside the repository, and source."""
+    from ..repo.search import is_source
+    if not path or path.startswith(("/", "~")) or ".." in Path(path).parts:
+        return False
+    if NEVER_TOUCH.search(path):
+        return False
+    return is_source(path)
+
+
 def harden(ctx, plan: ChangePlan, root_cause,
            candidates: list | None = None) -> None:
     """Everything below is code, because a forgotten caller breaks the build."""
@@ -147,11 +161,18 @@ def harden(ctx, plan: ChangePlan, root_cause,
     kept, dropped = [], []
     for fi in plan.files_to_change:
         if fi.path in known:
+            fi.is_new = False
+            kept.append(fi)
+        elif getattr(fi, "is_new", False) and _plausible_new_path(fi.path):
+            # A fix that needs a new module is ordinary work. The path still
+            # has to look like source in this repository, so a hallucinated
+            # path cannot smuggle itself onto the allow list.
             kept.append(fi)
         else:
             matches = [f for f in known if f.endswith("/" + fi.path)]
             if len(matches) == 1:
                 fi.path = matches[0]
+                fi.is_new = False
                 kept.append(fi)
             else:
                 dropped.append(fi.path)
@@ -161,6 +182,33 @@ def harden(ctx, plan: ChangePlan, root_cause,
     plan.files_to_change = kept or [
         FileIntent(f.path) for f in root_cause.files
         if f.path in known and not NEVER_TOUCH.search(f.path)][:1]
+
+    # Last resort. An empty plan is not a cautious plan: P3 refuses it, the
+    # cycle burns, and the run ends having changed nothing and explained
+    # nothing. Everything below is deterministic and already computed, so
+    # using it costs nothing and is strictly better than giving up.
+    if not plan.files_to_change:
+        fallback = [p for p in (candidates or [])
+                    if p in known and not NEVER_TOUCH.search(p)
+                    and is_source(p)]
+        if fallback:
+            c.log.line(f"plan named no usable file; falling back to "
+                       f"{fallback[0]}")
+            plan.files_to_change = [FileIntent(fallback[0])]
+        else:
+            c.degraded("no_target",
+                       "nothing in the plan, the root cause or the "
+                       "localization signals names a file in this repository")
+
+    # A must-not-change entry that does not exist here is noise: it makes the
+    # report look like the harness understands a repository it does not.
+    phantom = [p for p in plan.files_must_not_change
+               if p not in known and not p.endswith("/")]
+    if phantom:
+        plan.files_must_not_change = [p for p in plan.files_must_not_change
+                                      if p not in phantom]
+        c.log.line(f"dropped {len(phantom)} must-not-change path(s) that do "
+                   f"not exist here")
 
     # 2. test / lock / generated / vendor paths are moved to the deny list
     moved = [fi.path for fi in plan.files_to_change
