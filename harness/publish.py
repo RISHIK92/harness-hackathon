@@ -39,7 +39,7 @@ def _preamble(exit_code: int, summary) -> str:
 def _branch() -> str:
     try:
         r = subprocess.run(["git", "branch", "--show-current"],
-                           capture_output=True, text=True, timeout=10)
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
         return r.stdout.strip() or "(detached)"
     except (OSError, subprocess.SubprocessError):
         return "(unknown)"
@@ -54,6 +54,7 @@ def post_comment(ref: Ref, body: str, log) -> bool:
             proc = subprocess.run(
                 ["gh", kind, "comment", str(ref.number), "--repo", ref.slug,
                  "--body-file", "-"],
+                # `input=` is this call's stdin; setting both raises.
                 input=body, capture_output=True, text=True, timeout=60)
             if proc.returncode == 0:
                 log.line(f"posted a comment on {ref}", phase="P5")

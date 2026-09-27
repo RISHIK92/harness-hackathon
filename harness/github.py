@@ -26,7 +26,10 @@ from .model.http import request
 from .model.types import ProviderError
 from .verify.runner import run
 
-API = "https://api.github.com"
+# GITHUB_API_URL is what GitHub Actions and `gh` already set for
+# Enterprise installations, so honouring it costs nothing and makes the
+# GitHub path testable against a local stub instead of only in production.
+API = (os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
 
 REF_PATTERNS = (
     re.compile(r"^(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)#(?P<number>\d+)$"),
@@ -134,10 +137,21 @@ def _api(path: str, timeout: float = 15.0):
             raise GitHubError(
                 f"{path} not found. If the repository is private, set "
                 f"GITHUB_TOKEN.") from exc
-        if exc.status == 403:
+        if exc.status in (403, 429):
+            # Say which limit was hit and what actually fixes it. "Set
+            # GITHUB_TOKEN" is unhelpful advice to someone already logged
+            # in to `gh` -- the real answer there is that the harness should
+            # have used it.
+            if _gh_available():
+                hint = ("`gh` is installed: run `gh auth login` if you are "
+                        "not signed in, and this request will use it.")
+            else:
+                hint = ("Set GITHUB_TOKEN, or install `gh` and run "
+                        "`gh auth login`.")
             raise GitHubError(
-                "GitHub rate limit or access denied. Set GITHUB_TOKEN to "
-                "raise the limit from 60 to 5000 requests an hour.") from exc
+                f"GitHub refused the request (HTTP {exc.status}). "
+                f"Unauthenticated requests are limited to 60 an hour. "
+                f"{hint}") from exc
         raise GitHubError(f"GitHub API: {exc}") from exc
 
 
@@ -148,7 +162,7 @@ def _gh_available() -> bool:
 def _gh_json(args: list) -> dict | None:
     """Use the CLI when present: it already holds the user's auth."""
     try:
-        proc = subprocess.run(["gh", *args], capture_output=True, text=True,
+        proc = subprocess.run(["gh", *args], stdin=subprocess.DEVNULL, capture_output=True, text=True,
                               timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -189,7 +203,17 @@ def fetch(ref: Ref, log=None) -> Fetched:
                           "body": f"[on {c.get('path')}] {c.get('body')}"}
                          for c in (review or [])]
 
-    repo_meta = _api(f"/repos/{ref.slug}")
+    # Ask `gh` for this too. Reaching for unauthenticated REST here threw
+    # away the auth that had just worked: every run spent an anonymous
+    # request against the 60-an-hour limit, and once that ran out a
+    # perfectly accessible repository failed with "rate limit or access
+    # denied" -- while `gh` could have answered all along.
+    repo_meta = None
+    if via == "gh":
+        repo_meta = _gh_json(["api", f"repos/{ref.slug}"])
+    if repo_meta is None:
+        repo_meta = _api(f"/repos/{ref.slug}")
+    repo_meta = repo_meta or {}
     head = data.get("head") or {}
 
     return Fetched(

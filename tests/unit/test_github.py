@@ -124,8 +124,25 @@ def test_rate_limit_message_names_the_fix(monkeypatch):
         raise ProviderError("HTTP 403", status=403)
 
     monkeypatch.setattr(GH, "request", api)
-    with pytest.raises(GH.GitHubError, match="60 to 5000"):
+    with pytest.raises(GH.GitHubError, match="60 an hour"):
         GH.fetch(GH.parse_ref("a/b#1"), silent())
+
+
+def test_the_rate_limit_message_does_not_tell_a_gh_user_to_set_a_token(
+        monkeypatch):
+    """Telling someone already signed in to `gh` to "set GITHUB_TOKEN" sends
+    them after the wrong thing -- the real fault was not using their auth."""
+    from harness.model.types import ProviderError
+    monkeypatch.setattr(GH, "_gh_available", lambda: True)
+    monkeypatch.setattr(GH, "_gh_json", lambda args: None)
+
+    def api(*a, **k):
+        raise ProviderError("HTTP 403", status=403)
+
+    monkeypatch.setattr(GH, "request", api)
+    with pytest.raises(GH.GitHubError) as exc:
+        GH.fetch(GH.parse_ref("a/b#1"), silent())
+    assert "gh auth login" in str(exc.value)
 
 
 def test_gh_cli_is_used_when_available(monkeypatch):
@@ -133,7 +150,7 @@ def test_gh_cli_is_used_when_available(monkeypatch):
     seen = {}
 
     def gh_json(args):
-        seen["args"] = args
+        seen.setdefault("calls", []).append(args)
         return {"title": "from gh", "body": "b",
                 "comments": [{"author": {"login": "z"}, "body": "c"}],
                 "labels": [], "state": "open"}
@@ -143,8 +160,34 @@ def test_gh_cli_is_used_when_available(monkeypatch):
         "clone_url": "https://github.com/a/b.git", "default_branch": "main"})
     out = GH.fetch(GH.parse_ref("a/b#3"), silent())
     assert out.title == "from gh"
-    assert seen["args"][:2] == ["issue", "view"]
-    assert "--repo" in seen["args"]
+    assert seen["calls"][0][:2] == ["issue", "view"]
+    assert "--repo" in seen["calls"][0]
+
+
+def test_repository_metadata_also_goes_through_gh(monkeypatch):
+    """Fetching the issue with `gh` and then the repository anonymously
+    spent a request against the 60-an-hour limit on every single run, and
+    failed outright once it ran out -- while `gh` could have answered."""
+    monkeypatch.setattr(GH, "_gh_available", lambda: True)
+    calls = []
+
+    def gh_json(args):
+        calls.append(args)
+        if args[:1] == ["api"]:
+            return {"clone_url": "https://github.com/a/b.git",
+                    "default_branch": "trunk"}
+        return {"title": "t", "body": "b", "comments": [], "labels": [],
+                "state": "open"}
+
+    def must_not_run(path, timeout=15.0):
+        raise AssertionError(f"unauthenticated REST was used for {path}")
+
+    monkeypatch.setattr(GH, "_gh_json", gh_json)
+    monkeypatch.setattr(GH, "_api", must_not_run)
+
+    out = GH.fetch(GH.parse_ref("a/b#3"), silent())
+    assert out.default_branch == "trunk"
+    assert ["api", "repos/a/b"] in calls, "repo metadata skipped gh"
 
 
 def test_falls_back_to_the_api_when_gh_fails(monkeypatch):
