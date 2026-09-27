@@ -31,6 +31,8 @@ class Router:
         self.gw = gateway
         self.cfg = cfg
         self.log = log
+        from ..watcher import Watcher
+        self.watcher = Watcher(log=log)
 
     @property
     def single_model(self) -> bool:
@@ -57,10 +59,21 @@ class Router:
             max_tokens = max(256, int(max_tokens * 0.25))
 
         if samples <= 1:
-            return self.gw.call(messages, spec.id, phase=phase,
-                                max_tokens=max_tokens, temperature=temp,
-                                tools=tools, cache_prefix=cache_prefix,
-                                label=role)
+            reply = self.gw.call(messages, spec.id, phase=phase,
+                                 max_tokens=max_tokens, temperature=temp,
+                                 tools=tools, cache_prefix=cache_prefix,
+                                 label=role)
+            # A reply cut off at the ceiling never reached its answer. Ask
+            # again with room rather than handing an empty string to a phase
+            # that will call it a failure and burn a cycle on it.
+            budget = self.watcher.observe(role, max_tokens, reply)
+            while budget:
+                reply = self.gw.call(messages, spec.id, phase=phase,
+                                     max_tokens=budget, temperature=temp,
+                                     tools=tools, cache_prefix=cache_prefix,
+                                     label=f"{role}+", no_cache=True)
+                budget = self.watcher.observe(role, budget, reply)
+            return reply
 
         replies = []
         for i in range(samples):

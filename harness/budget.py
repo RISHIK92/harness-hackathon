@@ -103,6 +103,15 @@ class StepCounter:
         return self.counts.get(phase, 0)
 
 
+# (files at or above, wall-clock multiplier, token multiplier, label).
+# Ordered largest first; the first threshold met wins.
+REPO_SCALE = (
+    (20_000, 4.0, 2.5, "very large"),
+    (5_000, 2.5, 1.8, "large"),
+    (1_000, 1.6, 1.3, "sizeable"),
+)
+
+
 @dataclass
 class Budgets:
     """The three budgets, travelling together."""
@@ -117,6 +126,37 @@ class Budgets:
             clock=WallClock(limit_s=cfg.time_budget),
             steps=StepCounter(),
         )
+
+    def scale_to_repo(self, file_count: int, log=None) -> str:
+        """Grow the budgets to match the repository.
+
+        The defaults were set against fixtures of a few dozen files. A real
+        repository is three orders of magnitude bigger, and everything that
+        touches it grows with it: installing 137 dependencies, indexing 30k
+        files, running a suite that takes minutes rather than seconds. The
+        25-minute default is not a considered limit there -- it is the
+        fixture's limit, applied to something else.
+
+        Only ever grows, and only when the operator did not say otherwise:
+        an explicit budget is a decision, not a default to be improved on.
+        """
+        if file_count <= 0:
+            return ""
+        for threshold, time_x, token_x, label in REPO_SCALE:
+            if file_count >= threshold:
+                break
+        else:
+            return ""
+
+        before_s, before_t = self.clock.limit_s, self.tokens.total
+        self.clock.limit_s = int(before_s * time_x)
+        self.tokens.total = int(before_t * token_x)
+        note = (f"{label} repository ({file_count:,} files): "
+                f"{before_s // 60}m -> {self.clock.limit_s // 60}m, "
+                f"{before_t // 1000}k -> {self.tokens.total // 1000}k tokens")
+        if log is not None:
+            log.computed("budget", note, plain=f"budget: {note}")
+        return note
 
     def check(self, phase: str, cfg) -> None:
         self.clock.check(phase)

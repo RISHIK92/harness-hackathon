@@ -77,12 +77,15 @@ class Gateway:
     def call(self, messages: list[dict], model: str, phase: str = "P0",
              max_tokens: int = 4096, temperature: float = 0.0,
              tools: list[dict] | None = None, cache_prefix: int = 0,
-             label: str = "") -> ModelReply:
+             label: str = "", no_cache: bool = False) -> ModelReply:
         params = {"max_tokens": max_tokens, "temperature": temperature,
                   "tools": tools or []}
         key = self._cache_key(model, messages, params)
 
-        cached = self._cache_get(key)
+        # A retry after a truncated reply must reach the provider. Serving
+        # the cached failure again cannot produce a different answer -- that
+        # is how four cycles produced four identical empty replies.
+        cached = None if no_cache else self._cache_get(key)
         if cached is not None:
             self.calls += 1
             self.log.model_call(model, cached.tokens_in, cached.tokens_out,
