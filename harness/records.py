@@ -155,6 +155,7 @@ class FileIntent:
     path: str
     symbol: str | None = None
     intent: str = ""
+    is_new: bool = False      # a file the fix needs to create
 
 
 @dataclass

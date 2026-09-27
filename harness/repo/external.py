@@ -22,6 +22,9 @@ class Finding:
     kind: str            # dependency | env | runtime | contract | config
     detail: str
     severity: str = "medium"
+    # Repository files this finding came from. Empty means repo-wide (a
+    # dependency skew, say), which is relevant to any change.
+    where: list = field(default_factory=list)
 
     def render(self) -> str:
         return f"[{self.kind}] {self.detail}"
@@ -44,6 +47,23 @@ class ExternalFactors:
                     "none implicated")
         return ("external factors:\n"
                 + "\n".join("  " + f.render() for f in self.findings))
+
+    def relevant_to(self, paths) -> list:
+        """Findings that touch the files a fix actually changed.
+
+        A missing FIREBASE_PRIVATE_KEY is a real observation, but it says
+        nothing about a pure function in dashboardStats.js. Blocking on
+        every finding made C6 fail on any repository with unset environment
+        variables -- which is most of them -- and reported correct fixes as
+        PARTIAL.
+        """
+        wanted = {str(p) for p in (paths or [])}
+        out = []
+        for f in self.findings:
+            where = getattr(f, "where", None) or []
+            if not where or (wanted and wanted & set(where)):
+                out.append(f)          # repo-wide, or touches what we changed
+        return out
 
     def to_json(self) -> dict:
         return {"checked": self.checked,
@@ -71,19 +91,32 @@ def probe_all(repo: Path, toolchain=None, search=None) -> ExternalFactors:
 
 def _probe_env_vars(repo: Path, ef: ExternalFactors, toolchain, search) -> None:
     ef.checked.append("environment variables referenced by the code")
-    names: set[str] = set()
+    seen: dict = {}
     for path in _source_files(repo, limit=400):
         try:
             text = path.read_text("utf-8", errors="replace")
         except OSError:
             continue
-        names.update(ENV_USE.findall(text))
-    missing = sorted(n for n in names
+        # Always repo-relative. Relying on `is_absolute` produced
+        # ".harness/workspace/repo/src/x.js" whenever the repo was given as
+        # a relative path, which then never matched the repo-relative paths
+        # from changed_files() -- so relevance silently never matched.
+        rel = _relative(repo, path)
+        for name in ENV_USE.findall(text):
+            seen.setdefault(name, []).append(rel)
+    missing = sorted(n for n in seen
                      if n not in os.environ and not _looks_optional(n))
     for name in missing[:8]:
         ef.findings.append(Finding(
             "env", f"{name} is read by the code but is not set in this "
-                   "environment", "high"))
+                   "environment", "high", where=sorted(set(seen[name]))[:6]))
+
+
+def _relative(repo: Path, path: Path) -> str:
+    try:
+        return str(Path(path).resolve().relative_to(Path(repo).resolve()))
+    except (ValueError, OSError):
+        return str(path)
 
 
 def _looks_optional(name: str) -> bool:

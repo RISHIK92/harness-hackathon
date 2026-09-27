@@ -30,7 +30,18 @@ REMEDY_PHASE = {
 }
 
 
-def score(root_cause, plan, verify, workspace, cfg) -> ConfidenceReport:
+def _observed(cls) -> int:
+    """How many distinct tests a classification actually saw."""
+    if cls is None:
+        return 0
+    seen = set()
+    for bucket in ("new", "pre_existing", "fixed", "unknown", "flaky"):
+        seen.update(getattr(cls, bucket, None) or [])
+    return len(seen)
+
+
+def score(root_cause, plan, verify, workspace, cfg,
+          repro=None) -> ConfidenceReport:
     """Every condition is computed from evidence, not asserted."""
     r = ConfidenceReport()
 
@@ -56,9 +67,30 @@ def score(root_cause, plan, verify, workspace, cfg) -> ConfidenceReport:
     # appears in `blocking`. If it is still red after the fix, the fix did
     # not work -- reporting success there is the exact false positive FR-35
     # exists to prevent.
-    ran_tests = bool(verify.full or verify.scoped)
+    # A Classification exists even when the run observed no tests at all --
+    # a suite that failed to start produces an empty one. Treating that as
+    # "tests ran" let C3, the hard gate meaning "all existing tests pass",
+    # pass on a repository where not one test had ever executed. The gate
+    # has to mean what it says: something must have been observed.
+    # The oracle is executed on its own, so it never lands in a
+    # classification bucket -- a verdict on it is still a test that ran.
+    ran_tests = (any(_observed(c) for c in (verify.full, verify.scoped))
+                 or verify.oracle_passes is not None)
     r.existing_tests_pass = (ran_tests and not verify.blocking
                              and verify.oracle_passes is not False)
+
+    # A repository with no suite used to fail C3 forever, which is honest but
+    # leaves the harness unable to finish ordinary work. When the harness has
+    # written its own reproduction AND shown it red before the fix, that test
+    # is evidence of the same kind -- machine-checked, not asserted. It
+    # substitutes for a suite only when there is no suite to substitute for.
+    if repro is not None and repro.is_oracle:
+        if not ran_tests:
+            r.existing_tests_pass = repro.verified
+        elif not repro.verified:
+            # A proven reproduction that still fails means the fix did not
+            # work, whatever the rest of the suite says.
+            r.existing_tests_pass = False
 
     # C4 -- no unintended file changes (HARD)
     changed = set(workspace.changed_files())
@@ -74,9 +106,32 @@ def score(root_cause, plan, verify, workspace, cfg) -> ConfidenceReport:
     r.diff_proportional = (added + removed) <= cap
 
     # C6 -- external factors ruled out or addressed
+    #
+    # "Any finding blocks" made this fail on any repository with an unset
+    # environment variable, which is most of them: a missing
+    # FIREBASE_PRIVATE_KEY was enough to report a correct, verified fix in
+    # an unrelated pure function as PARTIAL. A finding counts against the
+    # fix only when it touches what the fix touched, or when it is
+    # repo-wide (a dependency skew).
     ef = root_cause.external_factors or {}
-    r.external_factors_resolved = bool(ef.get("ruled_out")) or \
-        root_cause.classification in ("config", "external")
+    touched = set(changed) | {f.path for f in (root_cause.files or [])}
+    blocking_findings = []
+    for raw in (ef.get("findings") or []):
+        if not isinstance(raw, dict):
+            continue
+        # Severity is what the probes already say about their own findings.
+        # "2 manifest change(s) in the last 90 days" is low, and is context
+        # rather than a fault -- it blocked a fix that passed every other
+        # gate, purely because it named no file.
+        if (raw.get("severity") or "medium").lower() == "low":
+            continue
+        where = set(raw.get("where") or [])
+        if not where or (touched and where & touched):
+            blocking_findings.append(raw)
+    r.external_factors_resolved = (
+        not blocking_findings
+        or bool(ef.get("ruled_out"))
+        or root_cause.classification in ("config", "external"))
 
     r.blocking = [c for c in ConfidenceReport.CONDITIONS
                   if not getattr(r, c)]

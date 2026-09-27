@@ -20,6 +20,7 @@ class RunSummary:
     reason: str = ""
     cycles: int = 0
     attempts: int = 0
+    repro: object = None          # a test the harness wrote itself
 
 
 def _k(n: int) -> str:
@@ -35,6 +36,16 @@ def build(cfg, log, summary, issue, root_cause, plan, verify, confidence,
     w = lines.append
 
     w(f"# Run report - {summary.status}")
+    # Why, immediately, and before anything else. A report that opens with
+    # NO_FIX and never says what stopped the run leaves the reader to guess
+    # from a trajectory file.
+    if summary.reason:
+        w("")
+        w(f"**{summary.reason}**")
+    if summary.status != "SUCCESS" and not workspace.changed_files():
+        w("")
+        w("_Nothing was changed. No patch was written and no verification "
+          "ran._")
     w("")
     w("## 1. Task")
     w(f"- type: `{issue.task_type}`   vagueness: {issue.vagueness}")
@@ -90,6 +101,17 @@ def build(cfg, log, summary, issue, root_cause, plan, verify, confidence,
 
     w("")
     w("## 6. Verification")
+    rep = getattr(summary, "repro", None)
+    if rep is not None and getattr(rep, "cmd", ""):
+        # Stated before the suite, because where there is no suite this is
+        # the only thing standing behind the fix.
+        w(f"- **self-written reproduction**: {rep.render()}")
+        w(f"  - command: `{rep.cmd}`")
+        w(f"  - proven to fail before the fix: "
+          f"{'yes' if rep.is_oracle else 'NO -- rejected, not used as evidence'}")
+        if getattr(rep, "attempts", 0) > 1:
+            w(f"  - attempts: {rep.attempts} "
+              f"(earlier ones passed before the fix and were discarded)")
     if verify:
         w(f"- lint: {verify.lint.render().splitlines()[0]}")
         if verify.oracle_passes is not None:
