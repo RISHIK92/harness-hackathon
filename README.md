@@ -11,6 +11,126 @@ for the build plan.
 
 ---
 
+## System architecture
+
+The harness is a deterministic control plane around probabilistic coding
+models. Models propose hypotheses, plans and edits; the harness owns repository
+access, executes every check, measures every result and decides whether a
+change is safe to submit.
+
+```mermaid
+flowchart TB
+    U["User / GitHub issue or pull request"] --> S["CLI and service entry points"]
+    S --> C["Configuration, consent and budgets"]
+    C --> O["Orchestrator: deterministic state machine"]
+
+    O --> B["Bootstrap and model capability probe"]
+    B --> G["Model gateway"]
+    G --> P["Provider adapters<br/>Anthropic / OpenAI-compatible"]
+    G --> MC["Call cache, retries, usage accounting and failover"]
+
+    O --> R["Repository control plane"]
+    R --> W["Workspace and change tracking"]
+    R --> T["Toolchain and dependency discovery"]
+    R --> X["Search, history and external-factor probes"]
+    R --> K["Isolated command runner / optional container"]
+
+    O --> BL["Baseline and localization"]
+    BL --> L["Coverage/SBFL, failing-test imports,<br/>lexical and structural signals"]
+
+    O --> P0["P0: triage"]
+    P0 --> P1["P1: investigate — read-only"]
+    P1 --> P2["P2: bind allowed scope"]
+    P2 --> P3["P3: implement"]
+    P3 --> P4["P4: verify"]
+    P4 --> P5["P5: confidence gates"]
+    P5 -- "failed condition" --> O
+    P5 -- "all conditions pass" --> PUB["Report, branch, pull request or issue comment"]
+
+    BL --> P1
+    G --> P0
+    G --> P1
+    G --> P2
+    G --> P3
+    G --> P4
+    W --> P3
+    W --> P4
+    P4 --> V["Lint delta → oracle → scoped tests<br/>→ full suite → independent diff judge"]
+    V --> P5
+    C --> PUB
+    O --> E["Event log and replay artifacts"]
+```
+
+### Component responsibilities
+
+| Layer | Responsibility |
+|---|---|
+| Entry and acquisition | Accepts issue text, a local checkout, or a GitHub issue/PR; clones and prepares external repositories when needed. |
+| Orchestration | Runs P0–P5 through one explicit state machine, enforces time/token/cycle budgets and chooses the recovery phase for each failed gate. |
+| Model gateway | Detects and ranks models, normalizes provider APIs, probes capabilities, caches calls, retries transient failures and fails over from the primary to the cheap model. |
+| Repository intelligence | Discovers language and test tooling, captures the pre-edit baseline, localizes failures with coverage/SBFL plus lexical, structural, test-import and history signals, and probes external factors. |
+| Controlled editing | Gives investigation no write tools; after a binding scope is approved, validates every create, update, delete and move against the allowed paths and change-size budget. |
+| Verification | Compares lint and tests with the baseline, runs the issue's oracle and scoped tests before the full suite, detects flaky and pre-existing failures, and asks a cheaper independent model to judge diff intent. |
+| Confidence and recovery | Computes six evidence-backed conditions. Failed scope, size, test, root-cause or external-factor conditions route back to the appropriate phase; no failed hard gate can reach submission. |
+| Publication and audit | Produces replayable JSONL events, structured evidence records, a patch and a human report; push, PR and issue-comment actions remain behind explicit consent. |
+
+### End-to-end data flow
+
+1. **Acquire and classify.** Normalize the task, discover the repository and
+   toolchain, probe model capabilities, and set budgets.
+2. **Measure before changing.** Install dependencies with consent, capture the
+   test/lint baseline and gather localization signals. This separates new
+   regressions from existing repository debt.
+3. **Investigate without write access.** The model proposes competing
+   hypotheses and executable checks; the harness runs those checks and records
+   the evidence used for the root cause.
+4. **Bind the change.** P2 names allowed and forbidden files, symbols and an
+   estimated line budget. P3 cannot silently expand that scope.
+5. **Edit and verify.** Apply validated edits, then run gates from cheapest to
+   most expensive. Repositories without tests get a temporary red-green
+   reproduction that must fail before the fix and pass afterward.
+6. **Recover or publish.** Confidence failures deterministically re-enter P1,
+   P2 or P3. Only a fully evidenced run can produce an outward-facing action,
+   and that action still passes through the consent policy.
+
+### Why this AI harness is unique
+
+Most coding agents optimize for generating a plausible patch. This harness
+optimizes for producing **evidence that the patch should be trusted**:
+
+- **Models do not decide reality.** They suggest what to inspect and how to
+  edit; deterministic tools execute checks, classify test transitions and
+  enforce submission policy.
+- **Root cause is a capability boundary.** Investigation is structurally
+  read-only, so the agent cannot code first and rationalize the change later.
+- **Verification has a before-state.** Baseline-aware lint and test
+  classification distinguish fixed, new, flaky and pre-existing failures
+  instead of treating a single green command as proof.
+- **Scope is executable, not prose.** Allowed paths, forbidden paths and a
+  proportional diff budget are hard gates checked against the actual Git
+  change set.
+- **No-test repositories still produce falsifiable evidence.** A generated
+  reproduction must be red on the original code and green after the fix, then
+  is removed so scaffolding cannot leak into the submitted patch.
+- **Recovery is designed, not improvised.** Each failed confidence condition
+  maps to a specific earlier phase, while stuck detection, alternative
+  hypotheses and bounded cycles prevent endless self-repair loops.
+- **It adapts without surrendering control.** Provider/model discovery,
+  capability probing, tier-specific action spaces, caching and primary-to-cheap
+  failover change how work is attempted—not what evidence is required.
+- **Submission is both evidence-gated and permission-gated.** Even a verified
+  fix cannot push, open a PR or post a comment unless the configured consent
+  policy allows that exact external action.
+- **Every claim is auditable.** Structured phase records, the baseline,
+  verification results, confidence conditions, patch and event trajectory make
+  a run replayable instead of leaving only a chat transcript.
+
+In short, the differentiator is not another model wrapper. It is an
+evidence-first software-engineering loop in which AI supplies reasoning and
+deterministic infrastructure supplies authority.
+
+---
+
 ## Quick start
 
 ```bash
