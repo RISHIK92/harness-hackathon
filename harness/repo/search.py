@@ -173,7 +173,9 @@ class Search:
 
     def files(self) -> list[str]:
         """Tracked files, or a filtered walk when git is unavailable."""
-        r = run("git ls-files", self.repo, timeout=30, check_deny=False)
+        # Never truncated: this is the index the whole run navigates by.
+        r = run("git ls-files", self.repo, timeout=30, check_deny=False,
+                truncate=False)
         if r.ok and r.stdout.strip():
             return [f for f in r.stdout.splitlines()
                     if f and not _skip(f)

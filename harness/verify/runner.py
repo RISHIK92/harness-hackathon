@@ -64,6 +64,21 @@ def check_allowed(cmd: str) -> None:
             raise CommandRefused(f"refused: {label}  ({cmd[:80]})")
 
 
+# The active container, or None for the host. Module level on purpose: it is
+# a property of the run, not of any one call.
+_CONTAINER = None
+
+
+def use_container(box) -> None:
+    """Route repository commands into `box`. None restores the host."""
+    global _CONTAINER
+    _CONTAINER = box
+
+
+def active_container():
+    return _CONTAINER
+
+
 def _clean_env(repo_path) -> dict:
     """A scrubbed copy of the environment. The API key never crosses this line."""
     env = {k: v for k, v in os.environ.items()
@@ -88,8 +103,21 @@ def _truncate(text: str) -> tuple[str, bool]:
 
 
 def run(cmd: str, cwd, timeout: float = 120.0, env_extra: dict | None = None,
-        check_deny: bool = True) -> Result:
-    """Run one command to completion. Never raises except on a denied command."""
+        check_deny: bool = True, truncate: bool = True) -> Result:
+    """Run one command to completion. Never raises except on a denied command.
+
+    stdin is /dev/null, always. A command that waits on input would otherwise
+    hang until the timeout while reading the *harness's* terminal -- stealing
+    the operator's keystrokes on the way. `npx node` on a repo with no test
+    framework is exactly that: it opens a REPL and sits there. With no stdin
+    it exits immediately instead, and the failure is visible in a second.
+    """
+    if not cmd or not str(cmd).strip():
+        # No test command discovered is a normal state for a repo without a
+        # suite. It must read as a failed command, not raise from inside
+        # subprocess and take the run down with it.
+        return Result(cmd="", exit_code=127, stdout="",
+                      stderr="no command to run", duration_s=0.0)
     if check_deny:
         check_allowed(cmd)
 
@@ -97,11 +125,20 @@ def run(cmd: str, cwd, timeout: float = 120.0, env_extra: dict | None = None,
     if env_extra:
         env.update(env_extra)
 
+    # A container, when one is active. Set once by the orchestrator so the
+    # thirty-odd call sites keep their signatures and stay unaware of where
+    # the command actually lands.
+    box = _CONTAINER
+    argv = box.exec_argv(cmd, cwd, env) if box is not None else None
+
     started = time.time()
     timed_out = False
     try:
         proc = subprocess.run(
-            cmd, cwd=str(cwd), shell=True, env=env, timeout=timeout,
+            argv if argv is not None else cmd,
+            cwd=None if argv is not None else str(cwd),
+            shell=argv is None, env=None if argv is not None else env,
+            timeout=timeout, stdin=subprocess.DEVNULL,
             capture_output=True, text=True, errors="replace")
         code, out, err = proc.returncode, proc.stdout or "", proc.stderr or ""
     except subprocess.TimeoutExpired as exc:
@@ -115,8 +152,15 @@ def run(cmd: str, cwd, timeout: float = 120.0, env_extra: dict | None = None,
     except OSError as exc:
         code, out, err = 127, "", f"could not execute: {exc}"
 
-    out, t1 = _truncate(out)
-    err, t2 = _truncate(err)
+    # Truncation protects the model's context, and is wrong for output the
+    # harness parses itself. `git ls-files` on a 30k-file repository is over
+    # a megabyte: capped, the file index silently held the alphabetically
+    # first 4.5k paths and the harness was blind to the rest of the tree.
+    if truncate:
+        out, t1 = _truncate(out)
+        err, t2 = _truncate(err)
+    else:
+        t1 = t2 = False
     return Result(cmd=cmd, exit_code=code, stdout=out, stderr=err,
                   duration_s=time.time() - started, timed_out=timed_out,
                   truncated=t1 or t2)

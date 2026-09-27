@@ -67,6 +67,39 @@ TYPE_PATTERNS = (
 ENV_KEY_RE = re.compile(r"KeyError:?\s*['\"]?([A-Z][A-Z0-9_]{3,})")
 
 
+def _resolve_path(cand: str, known_files: set[str]) -> list:
+    """A path from prose down to a path in this repository.
+
+    Issues routinely link to code rather than quote it, and a GitHub blob URL
+    carries the path with `github.com/owner/repo/blob/<sha>/` in front of it.
+    Matching only the whole candidate missed every such reference -- on a real
+    issue that named its three fix sites by URL, the harness found none of
+    them.
+
+    So leading segments are stripped one at a time until the tail names
+    something real. Beyond the first suffix match the tail must be *unique*
+    in the repository: "utils.ts" appearing forty times is not a reference to
+    any one of them.
+    """
+    if cand in known_files:
+        return [cand]
+    exact = [f for f in known_files if f.endswith("/" + cand)]
+    if exact:
+        return exact[:2]
+
+    parts = cand.split("/")
+    for i in range(1, len(parts)):
+        tail = "/".join(parts[i:])
+        if tail in known_files:
+            return [tail]
+        matches = [f for f in known_files if f.endswith("/" + tail)]
+        if len(matches) == 1:
+            return matches
+        if len(matches) > 1:
+            break          # ambiguous: naming it would be a guess
+    return []
+
+
 def extract_anchors(text: str, known_files: set[str],
                     known_symbols: set[str] | None = None) -> Anchors:
     a = Anchors()
@@ -75,13 +108,7 @@ def extract_anchors(text: str, known_files: set[str],
     # paths, cross-checked against the repository
     seen_files = []
     for m in PATH_RE.finditer(text):
-        cand = m.group(1).lstrip("./")
-        if cand in known_files:
-            seen_files.append(cand)
-        else:
-            matches = [f for f in known_files if f.endswith("/" + cand)
-                       or f == cand]
-            seen_files.extend(matches[:2])
+        seen_files.extend(_resolve_path(m.group(1).lstrip("./"), known_files))
     a.files = _uniq(seen_files)
 
     # frames

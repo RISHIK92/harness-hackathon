@@ -34,10 +34,11 @@ class Workspace:
                 check_deny=False)
         return r.ok and r.stdout.strip() == "true"
 
-    def git(self, args: str, timeout: float = 60.0):
+    def git(self, args: str, timeout: float = 60.0, truncate: bool = True):
         # Harness-issued git commands bypass the deny list: the list exists to
         # constrain MODEL-issued commands, and the harness owns checkpointing.
-        return run(f"git {args}", self.path, timeout=timeout, check_deny=False)
+        return run(f"git {args}", self.path, timeout=timeout,
+                   check_deny=False, truncate=truncate)
 
     def head(self) -> str:
         r = self.git("rev-parse HEAD")
@@ -86,9 +87,12 @@ class Workspace:
         from .search import SKIP_DIRS, SKIP_SUFFIX
         if not self.is_git:
             return []
-        r = self.git("diff --name-only HEAD")
+        # Never truncated: this list is what C4 checks for unintended
+        # changes, and a cut-off list would hide one.
+        r = self.git("diff --name-only HEAD", truncate=False)
         files = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
-        untracked = self.git("ls-files --others --exclude-standard")
+        untracked = self.git("ls-files --others --exclude-standard",
+                             truncate=False)
         files += [ln.strip() for ln in untracked.stdout.splitlines()
                   if ln.strip()]
 
@@ -96,6 +100,13 @@ class Workspace:
         for f in set(files):
             path = Path(f)
             if f.startswith((".harness", ".worktrees")):
+                continue
+            # The self-written reproduction (verify/repro.py) lives at the
+            # repository root so its imports are the ordinary ones. It is
+            # scaffolding, not a deliverable: counting it here would fail C4
+            # and put a model-written test in the diff.
+            if path.stem.startswith("harness_repro") or \
+                    path.name.startswith("test_harness_repro"):
                 continue
             if any(part in SKIP_DIRS for part in path.parts):
                 continue
