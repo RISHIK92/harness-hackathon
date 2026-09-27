@@ -148,13 +148,23 @@ class TerminalKeys(KeySource):
         whatever came next.
         """
         while True:
-            key = self._take()
-            if key is not None:
-                return key
-            if self._buf:
-                continue               # still parsing what we already have
-            if not self._fill():
-                return CTRL_C          # the stream closed under us
+            try:
+                key = self._take()
+                if key is not None:
+                    return key
+                if self._buf:
+                    continue           # still parsing what we already have
+                if not self._fill():
+                    return CTRL_C      # the stream closed under us
+            except KeyboardInterrupt:
+                # cbreak leaves ISIG on, so a real ^C arrives as a signal
+                # rather than as a byte -- which made every `key == CTRL_C`
+                # branch in the console unreachable by an actual ^C. Deliver
+                # it as the key it is. The signal handler restored the
+                # terminal on its way through, so raw mode is re-armed here.
+                self._buf = ""
+                self.enter_raw()
+                return CTRL_C
 
     def _take(self) -> str | None:
         """Consume one key from the buffer, or None if more input is needed."""
@@ -192,7 +202,21 @@ class TerminalKeys(KeySource):
             if end == 2 and buf[2] in ARROWS:
                 self._buf = buf[3:]
                 return ARROWS[buf[2]]
-            self._buf = buf[end + 1:]         # a sequence we do not use
+
+            # X10 mouse: ESC [ M then THREE raw bytes of button and
+            # coordinates. The terminator scan stops at the M, so without
+            # this the coordinates are parsed as keypresses -- and a column
+            # near 81 encodes as "q", which quit the console on a scroll.
+            if end == 2 and buf[2] == "M":
+                if len(buf) < 6:
+                    if self._fill(timeout=0.05) and len(self._buf) > len(buf):
+                        return self._take()
+                    self._buf = ""
+                    return None
+                self._buf = buf[6:]
+                return None
+
+            self._buf = buf[end + 1:]         # SGR mouse, focus, anything else
             return None
         # Esc followed by something that is not a sequence: a real Esc, and
         # the next key is left in the buffer where it belongs.
@@ -212,3 +236,46 @@ def reader(stream=None) -> KeySource:
         term.enter_raw()
         return term
     return ScriptedKeys([])
+
+
+def _diagnose() -> None:                          # pragma: no cover - manual
+    """`python -m harness.keys` -- show what this terminal actually sends.
+
+    The console disables every mouse mode, so the wheel should produce
+    nothing at all here. If scrolling prints anything, this terminal ignores
+    those resets, and the bytes it prints are what the parser must swallow.
+    """
+    import os
+    from . import screen as S
+
+    term = TerminalKeys()
+    if not term.available:
+        print("not a terminal")
+        return
+    sys.stdout.write(S.MOUSE_OFF)
+    sys.stdout.flush()
+    print("Press keys, scroll the wheel, then press q to finish.\r")
+    print("A scroll that prints nothing is a scroll that cannot close the "
+          "console.\r")
+    term.enter_raw()
+    try:
+        while True:
+            raw = os.read(term.fd, 64)
+            if not raw:
+                break
+            text = raw.decode("utf-8", "replace")
+            shown = text.replace("\x1b", "<ESC>")
+            print(f"  {len(raw):>3} byte(s)  {shown!r:<34} "
+                  f"{[hex(b) for b in raw]}\r")
+            if text == "q":
+                break
+    except (KeyboardInterrupt, OSError):
+        pass
+    finally:
+        term.close()
+        sys.stdout.write("\x1b[?1007h")
+        sys.stdout.flush()
+
+
+if __name__ == "__main__":                        # pragma: no cover - manual
+    _diagnose()

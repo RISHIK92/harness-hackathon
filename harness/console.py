@@ -16,6 +16,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import finder
 from . import keys as K
 from .screen import Screen
 from .ui import human_time
@@ -179,6 +180,60 @@ class Console:
                 if items[idx].enabled:
                     return idx
 
+    # -- the @ repository picker -------------------------------------------
+    def pick_repo(self, query: str = "") -> Path | None:
+        """Type to filter local git repositories. `@` opens this anywhere."""
+        t = self.log.theme
+        self.source.enter_raw()
+        self._draw(["", f"    {t.bold}Local repositories{t.reset}", "",
+                    f"    {t.dim}scanning...{t.reset}"])
+        repos = finder.discover(cache_dir=self.cfg.work_dir / "cache")
+        if not repos:
+            self._note("no git repositories found nearby")
+            return None
+
+        selected = 0
+        while True:
+            hits = finder.match(repos, query)
+            selected = min(selected, max(0, len(hits) - 1))
+            lines = ["", f"    {t.bold}Local repositories{t.reset}",
+                     f"  {t.paint(self.log.g.PHASE, t.accent)} "
+                     f"@{query}{t.accent}\u2588{t.reset}", ""]
+            if not hits:
+                lines.append(f"    {t.dim}nothing matches{t.reset}")
+            for i, repo in enumerate(hits[:10]):
+                mark = self.log.g.PHASE if i == selected else " "
+                colour = t.accent if i == selected else ""
+                lines.append(f"  {t.paint(mark, t.accent)} "
+                             f"{t.paint(repo.name[:28].ljust(30), colour)}"
+                             f"{t.dim}{repo.home}{t.reset}")
+            more = max(0, len(hits) - 10)
+            if more:
+                lines.append(f"    {t.dim}+{more} more - keep typing{t.reset}")
+            lines += ["", f"    {t.dim}type to filter   \u2191\u2193 move   "
+                          f"tab pick   esc back{t.reset}"]
+            self._draw(lines)
+
+            key = self.source.read()
+            if key in (K.ESC, K.CTRL_C):
+                self._undraw()
+                return None
+            if key in (K.TAB, K.ENTER):
+                if hits:
+                    self._undraw()
+                    return Path(hits[selected].path)
+                continue
+            if key == K.UP:
+                selected = max(0, selected - 1)
+            elif key == K.DOWN:
+                selected = min(len(hits[:10]) - 1, selected + 1)
+            elif key == K.BACKSPACE:
+                query = query[:-1]
+                selected = 0
+            elif len(key) == 1 and key.isprintable():
+                query += key
+                selected = 0
+
     # -- input -------------------------------------------------------------
     def _edit(self, title: str, hint: str, default: str = "",
               multiline: bool = False) -> str | None:
@@ -233,12 +288,35 @@ class Console:
             if key == K.DOWN and row < len(lines) - 1:
                 row += 1
                 continue
+            if key == "@" and not lines[row].strip():
+                picked = self.pick_repo()
+                if picked is not None:
+                    lines[row] = str(picked)
+                continue
             if len(key) == 1 and key.isprintable():
                 lines[row] += key
 
         self._undraw()
         value = "\n".join(lines).strip()
         return value or None
+
+    def clarify(self, question: str, why: str = "") -> str | None:
+        """Ask the operator one question mid-run.
+
+        Only reached when a human is present. Unattended the harness declines
+        to guess instead, which is the honest behaviour when there is nobody
+        to ask.
+        """
+        t = self.log.theme
+        lines = ["", f"  {t.paint(self.log.g.WARN, t.warn)} "
+                     f"{t.bold}I need one thing to continue{t.reset}"]
+        if why:
+            lines.append(f"    {t.dim}{why}{t.reset}")
+        lines += ["", f"    {question}", ""]
+        self._draw(lines)
+        answer = self._edit("your answer", "tab when done, esc to skip")
+        self._undraw()
+        return answer
 
     def ask_line(self, title: str, hint: str = "",
                  default: str = "") -> str | None:
@@ -337,6 +415,19 @@ class Console:
             pass
 
     # -- the flow ----------------------------------------------------------
+    def chat(self) -> str | None:
+        """Talk to it. Returns an issue to run, or None when they leave."""
+        from .chat import Chat
+        if not self.full:
+            self._note("chat needs a terminal")
+            return None
+        self.screen.set_panel(None)          # the transcript, not a panel
+        try:
+            return Chat(console=self, cfg=self.cfg, log=self.log).run()
+        finally:
+            self.screen.set_status("")
+            self.screen.render()
+
     def select_task(self, bootstrap=None) -> Choice:
         """Ask what to work on. Returns an empty Choice only to quit.
 
@@ -350,9 +441,10 @@ class Console:
             items = [
                 Item("paste an issue", "write it in place, tab when done"),
                 Item("github issue or pull request", "owner/repo#123"),
-                Item("a local repository", str(self.cfg.repo_path)),
+                Item("a local repository", "@ to search, or pick below"),
                 Item("recent", f"{len(past)} previous run(s)",
                      enabled=bool(past)),
+                Item("chat", "ask about this repository, /run to fix"),
             ]
             picked = self.menu("What should I work on?", items)
             if picked is None:
@@ -373,19 +465,27 @@ class Console:
                 return Choice(issue=ref, github_ref=ref)
 
             if picked == 2:
-                path = self.ask_line("Repository",
-                                     "absolute or relative path",
-                                     default=str(self.cfg.repo_path))
-                if not path:
-                    continue
-                repo = Path(path).expanduser().resolve()
-                if not repo.is_dir():
-                    self._note(f"no such directory: {repo}")
+                repo = self.pick_repo() if self.full else None
+                if repo is None and not self.full:
+                    path = self.ask_line("Repository",
+                                         "absolute or relative path",
+                                         default=str(self.cfg.repo_path))
+                    repo = Path(path).expanduser().resolve() if path else None
+                    if repo is not None and not repo.is_dir():
+                        self._note(f"no such directory: {repo}")
+                        continue
+                if repo is None:
                     continue
                 text = self.ask_paste()
                 if not text:
                     continue
                 return Choice(issue=text, repo=repo)
+
+            if picked == 4:
+                issue = self.chat()
+                if not issue:
+                    continue                       # left the chat: back here
+                return Choice(issue=issue)
 
             entries = [Item(e["issue"].splitlines()[0][:44],
                             f"{e['when']}  exit {e['exit']}") for e in past]
@@ -395,6 +495,28 @@ class Console:
                 continue
             chosen = past[which]
             return Choice(issue=chosen["issue"], repo=Path(chosen["repo"]))
+
+    def consent_card(self, action: str, summary: str, rows: list) -> bool:
+        """The Gate's question, as a card. Esc declines."""
+        from . import consent
+        t = self.log.theme
+        lines = ["", f"  {t.paint(self.log.g.WARN, t.warn)} "
+                     f"{t.bold}Permission needed{t.reset}",
+                 f"    {t.dim}{consent.DESCRIBE.get(action, action)}{t.reset}",
+                 ""]
+        for key, value in rows:
+            lines.append(f"    {t.dim}{str(key).ljust(14)}{t.reset}{value}")
+        lines += ["", f"    {t.dim}tab allow   esc decline{t.reset}"]
+        self._draw(lines)
+        self.source.enter_raw()
+        while True:
+            key = self.source.read()
+            if key in (K.TAB, K.ENTER, "y"):
+                self._undraw()
+                return True
+            if key in (K.ESC, "q", "n", K.CTRL_C):
+                self._undraw()
+                return False
 
     def confirm_github(self, fetched, target: Path, cfg) -> bool:
         rows = [
@@ -412,7 +534,7 @@ class Console:
         return self.card(str(fetched.ref), rows, "tab start   esc back")
 
     def after_run(self, exit_code: int, cfg, report_path: Path,
-                  github_ref=None) -> str:
+                  github_ref=None, pr_hook=None) -> str:
         """Returns 'again' or 'quit'."""
         actions = ["diff", "report"]
         items = [
@@ -420,6 +542,11 @@ class Console:
             Item("open the full report", str(report_path),
                  enabled=report_path.is_file()),
         ]
+        if pr_hook is not None:
+            items.append(Item("commit, push and open a pull request",
+                              "asks before anything leaves the machine",
+                              enabled=exit_code in (0, 2)))
+            actions.append("pr")
         # Only offer to comment when there is somewhere to comment on: an
         # item reading "post the report to None" is noise.
         if github_ref is not None:
@@ -448,6 +575,11 @@ class Console:
                 self._show_file(report_path)
             elif action == "post":
                 self._post(github_ref, report_path, exit_code, cfg)
+                items[picked].enabled = False
+                at = 0
+            elif action == "pr":
+                result = pr_hook()
+                self._note(result.render() if result else "nothing to push")
                 items[picked].enabled = False
                 at = 0
 
@@ -507,9 +639,39 @@ class Console:
                 top = max(0, top - 1)
 
     def _show_diff(self, cfg) -> None:
+        """Everything that changed, however it changed.
+
+        A plain `git diff` shows only unstaged work, so anything staged --
+        by a checkpoint, or on the way to a commit -- reads as "no changes"
+        while the fix is sitting right there. Untracked files never appear
+        in it at all, which hides a newly created file completely.
+        """
         from .verify.runner import run
-        result = run("git diff", cfg.repo_path, timeout=30, check_deny=False)
-        self._page("Diff", result.stdout[:40000] or "  (no changes)")
+
+        def git(args):
+            return run(f"git {args}", cfg.repo_path, timeout=30,
+                       check_deny=False).stdout
+
+        parts = []
+        tracked = git("diff HEAD")          # staged and unstaged together
+        if tracked.strip():
+            parts.append(tracked)
+
+        untracked = [ln.strip() for ln in
+                     git("ls-files --others --exclude-standard").splitlines()
+                     if ln.strip()]
+        for path in untracked[:20]:
+            body = git(f"diff --no-index -- /dev/null {path}")
+            parts.append(body if body.strip() else f"new file: {path}")
+
+        if not parts:
+            # Changed, then committed: the work is in HEAD, not beside it.
+            last = git("show --stat --oneline HEAD")
+            if last.strip() and git("rev-list --count HEAD").strip() not in \
+                    ("", "1"):
+                parts.append("committed as:\n" + last)
+
+        self._page("Diff", "\n".join(parts)[:40000] or "  (no changes)")
 
     def _show_file(self, path: Path) -> None:
         try:

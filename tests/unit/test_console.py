@@ -346,3 +346,96 @@ def test_escape_adjacent_to_the_next_key_loses_neither():
 
 def test_an_unknown_escape_sequence_does_not_eat_the_next_key():
     assert _parse(b"\x1b[5~\x1b[B", 1) == [K.DOWN]
+
+
+# -- mouse: scrolling must not act like keypresses -------------------------
+def test_x10_mouse_events_are_discarded():
+    """Scroll sends ESC [ M plus three raw bytes of button and coordinates.
+    Parsed as keys, a column near 81 encodes as 'q' and quit the console."""
+    scroll_up = b"\x1b[M" + bytes([64 + 32, 32 + 10, 32 + 5])
+    at_col_81 = b"\x1b[M" + bytes([64 + 32, ord("q"), 32 + 5])
+    assert _parse(scroll_up + b"x", 1) == ["x"]
+    assert _parse(at_col_81 + b"x", 1) == ["x"]
+
+
+def test_sgr_mouse_events_are_discarded():
+    assert _parse(b"\x1b[<64;10;5M" + b"x", 1) == ["x"]
+    assert _parse(b"\x1b[<0;10;5m" + b"x", 1) == ["x"]
+
+
+def test_focus_events_are_discarded():
+    assert _parse(b"\x1b[I\x1b[O" + b"x", 1) == ["x"]
+
+
+def test_a_real_key_after_a_mouse_event_still_arrives():
+    scroll = b"\x1b[M" + bytes([64 + 32, ord("q"), 32 + 5])
+    assert _parse(scroll + b"\x1b[B", 1) == [K.DOWN]
+
+
+# ---------------------------------------------------------------------------
+# The wheel must never reach the key parser.
+# ---------------------------------------------------------------------------
+
+def test_opening_the_frame_turns_every_mouse_mode_off():
+    """Inheriting the terminal's mouse state is what made scrolling close the
+    console: reporting on means the wheel arrives as bytes, and alternate
+    scroll means it arrives as arrow keys. Neither may be left to chance."""
+    import io
+    from harness import screen as S
+
+    class FakeTTY(io.StringIO):
+        def isatty(self):
+            return True
+
+    out = FakeTTY()
+    scr = S.Screen(stream=out)
+    scr._rows, scr._cols = 40, 120        # comfortably above the minimum
+    assert scr.open(), "the frame refused to open on a fake tty"
+    written = out.getvalue()
+
+    for mode in ("1000", "1002", "1003", "1005", "1006", "1015"):
+        assert f"\x1b[?{mode}l" in written, f"mouse mode {mode} left as-is"
+    assert "\x1b[?1007l" in written, "alternate scroll left on: wheel -> arrows"
+    assert written.index("\x1b[?1049h") < written.index("\x1b[?1000l"), \
+        "mouse modes must be set after entering the alternate buffer"
+
+    scr.close()
+    assert "\x1b[?1007h" in out.getvalue(), "alternate scroll not restored"
+
+
+def test_a_wheel_report_yields_no_keypress_in_any_encoding():
+    """Second line of defence, for terminals that ignore the mode resets."""
+    from harness.keys import TerminalKeys
+
+    reports = {
+        "X10 at column 81": "\x1b[M" + chr(64 + 32) + "q" + chr(32 + 5),
+        "SGR press":        "\x1b[<64;81;5M",
+        "SGR release":      "\x1b[<64;81;5m",
+        "urxvt":            "\x1b[96;81;5M",
+    }
+    for name, seq in reports.items():
+        k = TerminalKeys(stream=None)
+        k._buf = seq + "x"          # a real keypress behind the report
+        got = []
+        for _ in range(4):
+            key = k._take()
+            if key is not None:
+                got.append(key)
+            if not k._buf:
+                break
+        assert got == ["x"], f"{name}: wheel produced {got!r}, not nothing"
+
+
+def test_a_leaked_wheel_payload_never_reads_as_quit():
+    """The specific failure: column 81 encodes as "q", and "q" closes the
+    menu. If this regresses, scrolling quits the console again."""
+    from harness.keys import TerminalKeys
+
+    k = TerminalKeys(stream=None)
+    k._buf = "\x1b[M" + chr(64 + 32) + "q" + chr(32 + 5)
+    keys = []
+    while k._buf:
+        key = k._take()
+        if key is not None:
+            keys.append(key)
+    assert "q" not in keys, "a scroll still reads as the quit key"

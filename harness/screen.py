@@ -20,12 +20,33 @@ import re
 import shutil
 import signal
 import sys
+import threading
 
 ALT_ON = "\x1b[?1049h"
 ALT_OFF = "\x1b[?1049l"
 CURSOR_OFF = "\x1b[?25l"
 CURSOR_ON = "\x1b[?25b".replace("b", "h")
 CLEAR = "\x1b[2J\x1b[H"
+
+# The wheel must not be able to reach the key parser at all.
+#
+# A full-screen app inherits whatever mouse state the terminal was left in by
+# whatever ran before it. Two inherited modes each break the frame:
+#
+#   * mouse reporting (1000/1002/1003, with 1005/1006/1015 encodings) makes a
+#     scroll arrive as an escape sequence whose payload bytes are raw -- at
+#     column 81 the column byte is literally "q", which quit the console.
+#   * alternate scroll (1007) turns the wheel into Up/Down arrow keys, which
+#     move the selection under the operator without them touching a key.
+#
+# So we do not guess: we turn every one of them off on the way in. The wheel
+# then produces no input whatsoever, and the parser's mouse handling is left
+# as a second line of defence for terminals that ignore these.
+MOUSE_OFF = ("\x1b[?1000l\x1b[?1002l\x1b[?1003l"
+             "\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1007l")
+# 1007 only has any effect inside the alternate buffer, which we are leaving,
+# so restoring the common default is safe and keeps normal scrollback usable.
+MOUSE_RESTORE = "\x1b[?1007h"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 MIN_ROWS = 12
@@ -69,6 +90,10 @@ class Screen:
         self.status: str = ""
         self.open_ = False
         self._registered = False
+        # The status line is repainted by a ticker thread while a phase runs,
+        # so composing a frame and writing it has to be atomic -- two
+        # interleaved cursor-positioned writes produce a scrambled screen.
+        self._lock = threading.RLock()
         self._rows, self._cols = self._size()
 
     # -- lifecycle ---------------------------------------------------------
@@ -93,7 +118,7 @@ class Screen:
         if self.open_ or not self.usable:
             return False
         self._rows, self._cols = self._size()
-        self._write(ALT_ON + CURSOR_OFF + CLEAR)
+        self._write(ALT_ON + CURSOR_OFF + MOUSE_OFF + CLEAR)
         self.open_ = True
         if not self._registered:
             atexit.register(self.close)
@@ -131,7 +156,7 @@ class Screen:
         """Leave the alternate buffer and return the transcript."""
         if not self.open_:
             return "\n".join(self.body)
-        self._write(CURSOR_ON + ALT_OFF)
+        self._write(CURSOR_ON + MOUSE_RESTORE + ALT_OFF)
         self.open_ = False
         return "\n".join(self.body)
 
@@ -164,6 +189,10 @@ class Screen:
 
     # -- drawing -----------------------------------------------------------
     def render(self) -> None:
+        with self._lock:
+            self._render_locked()
+
+    def _render_locked(self) -> None:
         if not self.open_:
             return
         rows, cols = self._rows, self._cols

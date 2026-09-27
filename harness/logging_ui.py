@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
 import time
 
-from .ui import (ASCII_GLYPHS, Glyphs, Status, Theme, colour_enabled,
-                 human_time, human_tokens, supports_unicode)
+from .ui import (ASCII_GLYPHS, ASCII_SPINNER, Glyphs, SPINNER, Status,
+                 Theme, colour_enabled, human_time, human_tokens,
+                 supports_unicode)
 
 # Anything shaped like a provider credential, longest prefixes first so the
 # more specific pattern wins.
@@ -76,6 +78,10 @@ class Logger:
         self._phase = "--"
         self._counters = None          # set by the orchestrator
         self.screen = None             # set when the console owns the screen
+        self._working_text = ""
+        self._tick = 0
+        self._ticker = None
+        self._tick_stop = threading.Event()
 
     # -- live status -------------------------------------------------------
     def bind_counters(self, fn) -> None:
@@ -84,26 +90,65 @@ class Logger:
 
     def working(self, text: str) -> None:
         if self.screen is not None and self.screen.open_:
-            suffix = ""
-            if self._counters:
-                try:
-                    suffix = self._counters() or ""
-                except Exception:
-                    suffix = ""
-            t = self.theme
-            self.screen.set_status(
-                f"  {t.paint(self.g.PHASE, t.accent)} {text}"
-                f"{t.dim}{suffix}{t.reset}")
-            self.screen.render()
+            # Painting once here froze the elapsed time and the token count
+            # at the instant the phase started, so a four-minute phase read
+            # "0s" throughout. The inline path has always had a thread for
+            # this; the full-screen path needs one too.
+            self._working_text = text
+            self._paint_working()
+            self._start_ticker()
             return
         self.status.set(text, self._counters)
 
+    def _paint_working(self) -> None:
+        screen = self.screen
+        if screen is None or not screen.open_ or not self._working_text:
+            return
+        suffix = ""
+        if self._counters:
+            try:
+                suffix = self._counters() or ""
+            except Exception:
+                suffix = ""
+        t = self.theme
+        frames = SPINNER if self.unicode else ASCII_SPINNER
+        frame = frames[self._tick % len(frames)]
+        self._tick += 1
+        screen.set_status(f"  {t.paint(frame, t.accent)} "
+                          f"{self._working_text}{t.dim}{suffix}{t.reset}")
+        screen.render()
+
+    def _start_ticker(self) -> None:
+        if self._ticker and self._ticker.is_alive():
+            return
+        self._tick_stop.clear()
+
+        def spin():
+            while not self._tick_stop.wait(0.2):
+                try:
+                    self._paint_working()
+                except Exception:
+                    return          # the frame went away under us
+        self._ticker = threading.Thread(target=spin, daemon=True)
+        self._ticker.start()
+
+    def _stop_ticker(self) -> None:
+        self._tick_stop.set()
+        ticker, self._ticker = self._ticker, None
+        if ticker and ticker.is_alive():
+            ticker.join(timeout=0.4)
+        self._working_text = ""
+
     def done_working(self) -> None:
+        self._stop_ticker()
         if self.screen is not None:
             self.screen.set_status("")
+            if self.screen.open_:
+                self.screen.render()
         self.status.clear()
 
     def close(self) -> None:
+        self._stop_ticker()
         self.status.stop()
 
     # -- primitives --------------------------------------------------------

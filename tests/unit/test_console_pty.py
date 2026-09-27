@@ -25,6 +25,10 @@ UP = b"\x1b[A"
 DOWN = b"\x1b[B"
 TAB = b"\t"
 ESC_B = b"\x1b"
+# X10 wheel report: ESC [ M then three raw bytes. At column 81 the column
+# byte is "q" -- which is what used to quit the console mid-scroll.
+SCROLL = b"\x1b[M" + bytes([64 + 32, ord("q"), 32 + 5])
+END = "<<END>>"
 
 
 def _reattach_std():
@@ -42,7 +46,7 @@ def keys(*items) -> list:
     look broken when it is not."""
     out = []
     for item in items:
-        if item in (UP, DOWN, TAB, ESC_B, b"\r"):
+        if item in (UP, DOWN, TAB, ESC_B, b"\r", SCROLL):
             out.append(item)
         else:
             out.extend(bytes([b]) for b in item)
@@ -56,6 +60,8 @@ def drive(script, settle: float = 0.45, scenario: str = "select") -> str:
         try:
             _reattach_std()
             sys.path.insert(0, str(ROOT))
+            import termios
+            before = termios.tcgetattr(0)
             from harness import config as C
             from harness import console as Console
             from harness.logging_ui import Logger
@@ -70,6 +76,26 @@ def drive(script, settle: float = 0.45, scenario: str = "select") -> str:
                     report = ROOT / "README.md"
                     result = ui.after_run(0, cfg, report, None)
                     tail = f"AFTER={result}"
+                elif scenario == "picker":
+                    picked = ui.pick_repo()
+                    tail = f"PICK={getattr(picked, 'name', None) or picked}"
+                elif scenario == "clarify":
+                    answer = ui.clarify("Which file should I start from?",
+                                        "The issue names no file or symbol.")
+                    tail = f"CLARIFY={answer}"
+                elif scenario == "consent":
+                    ok = ui.consent_card("push", "push the branch",
+                                         [("repo", "a/b"), ("branch", "x")])
+                    tail = f"CONSENT={ok}"
+                elif scenario == "gate_install":
+                    # The real Gate, with the real card behind it.
+                    from harness import consent
+                    gate = consent.Gate(consent.Policy.from_env(), log,
+                                        confirm=ui.consent_card)
+                    ok = gate.allow(consent.INSTALL,
+                                    "install dependencies with npm",
+                                    [("command", "npm ci --ignore-scripts")])
+                    tail = f"CONSENT={ok} DECIDED={gate.decisions[0][1]}"
                 else:
                     choice = ui.select_task()
                     tail = (f"CHOICE={choice.github_ref or ''}|"
@@ -77,11 +103,15 @@ def drive(script, settle: float = 0.45, scenario: str = "select") -> str:
             finally:
                 ui.source.close()
                 ui.release_terminal()
-            sys.stdout.write(f"\nOWNED={owned} {tail}\n")
+            after = termios.tcgetattr(0)
+            flags = termios.ECHO | termios.ICANON | termios.ISIG
+            restored = (after[3] & flags) == (before[3] & flags)
+            sys.stdout.write(f"\nOWNED={owned} {tail} "
+                             f"RESTORED={restored} {END}\n")
             sys.stdout.flush()
         except BaseException as exc:               # pragma: no cover
             try:
-                sys.stdout.write(f"\nCHILD-ERROR={exc!r}\n")
+                sys.stdout.write(f"\nCHILD-ERROR={exc!r} {END}\n")
                 sys.stdout.flush()
             except BaseException:
                 pass
@@ -91,7 +121,28 @@ def drive(script, settle: float = 0.45, scenario: str = "select") -> str:
     out = b""
     deadline = time.time() + 12
     try:
-        time.sleep(settle)                         # let the menu draw
+        # Wait for the frame, do not guess at it. A fixed sleep is a race:
+        # under load the child has not entered raw mode yet, the first
+        # keystrokes are echoed by the tty, and the test fails for a reason
+        # that has nothing to do with the console.
+        ready = time.time() + 8
+        while time.time() < ready:
+            r, _, _ = select.select([fd], [], [], 0.1)
+            if r:
+                try:
+                    out += os.read(fd, 8192)
+                except OSError:
+                    break
+            # The picker scans the filesystem before drawing, so the header
+            # appearing does not mean it is ready for keys. Wait for the
+            # screen the scenario is actually about.
+            marker = {"picker": b"Local repositories",
+                      "consent": b"Permission needed",
+                      "gate_install": b"Permission needed",
+                      "clarify": b"I need one thing"}.get(scenario, b"HARNESS")
+            if marker in out:
+                break
+        time.sleep(0.1)                            # let the reader settle
         chunks = script if isinstance(script, list) else \
             [script[i:i + 1] for i in range(len(script))]
         for chunk in chunks:
@@ -103,7 +154,7 @@ def drive(script, settle: float = 0.45, scenario: str = "select") -> str:
         while time.time() < deadline:
             r, _, _ = select.select([fd], [], [], 0.3)
             if not r:
-                if b"CHOICE=" in out or b"CHILD-ERROR" in out:
+                if END.encode() in out:
                     break
                 continue
             try:
@@ -113,7 +164,7 @@ def drive(script, settle: float = 0.45, scenario: str = "select") -> str:
             if not data:
                 break
             out += data
-            if b"CHOICE=" in out or b"CHILD-ERROR" in out:
+            if END.encode() in out:
                 break
     finally:
         try:
@@ -288,3 +339,201 @@ def test_run_another_is_reachable():
     # items: diff, report(README exists so enabled), run another, quit
     out = drive(keys(DOWN, DOWN, TAB), settle=0.5, scenario="after")
     assert "AFTER=again" in out, out[-400:]
+
+
+# ---------------------------------------------------------------------------
+# End-to-end sweep: every screen, every way out.
+#
+# The bugs this catches are the ones that only appear when a real terminal is
+# on the other end -- a key parser that eats the next keystroke, a frame that
+# scrolls instead of redrawing, a wheel event read as "q", an exception path
+# that leaves the terminal in raw mode. Each case asserts the same three
+# invariants, because any one of them failing is a broken CLI.
+# ---------------------------------------------------------------------------
+
+SWEEP = [
+    ("menu: quit",                "select",  keys(b"q"), "CHOICE=|quit"),
+    ("menu: esc quits",           "select",  keys(ESC_B), "CHOICE=|quit"),
+    ("menu: arrows then quit",    "select",  keys(DOWN, DOWN, UP, b"q"),
+     "CHOICE=|quit"),
+    # The wheel must not merely fail to crash -- it must not be read as a
+    # keypress at all. So scroll first, then drive the menu to a *distinct*
+    # outcome: if the wheel still reached the console as "q", this comes back
+    # quit instead of go, and the old bug is caught.
+    ("menu: wheel is inert",      "select",
+     keys(SCROLL, SCROLL, TAB, b"still here", TAB), "CHOICE=|go"),
+    ("paste: esc returns",        "select",  keys(TAB, b"hello", ESC_B, b"q"),
+     "CHOICE=|quit"),
+    ("paste: submit",             "select",  keys(TAB, b"a bug", TAB),
+     "CHOICE=|go"),
+    ("github: esc returns",       "select",
+     keys(DOWN, TAB, b"a/b#1", ESC_B, b"q"), "CHOICE=|quit"),
+    ("github: submit",            "select",  keys(DOWN, TAB, b"a/b#5", TAB),
+     "CHOICE=a/b#5|go"),
+    ("picker: esc returns",       "picker",  keys(b"harn", ESC_B),
+     "PICK=None"),
+    ("picker: filter and pick",   "picker",  keys(b"harn", TAB),
+     "PICK=harness-hackathon"),
+    ("picker: no match, esc",     "picker",  keys(b"zzzzzz", ESC_B),
+     "PICK=None"),
+    ("consent: allow",            "consent", keys(TAB), "CONSENT=True"),
+    ("consent: decline",          "consent", keys(ESC_B), "CONSENT=False"),
+    ("after: diff pager",         "after",   keys(TAB, ESC_B, b"q"),
+     "AFTER=quit"),
+    ("after: report pager",       "after",
+     keys(DOWN, TAB, DOWN, DOWN, ESC_B, b"q"), "AFTER=quit"),
+    ("after: run another",        "after",   keys(DOWN, DOWN, TAB),
+     "AFTER=again"),
+    # Same again inside the pager: scroll, leave, then pick a distinct item.
+    ("after: wheel inside pager", "after",
+     keys(TAB, SCROLL, SCROLL, ESC_B, DOWN, DOWN, TAB), "AFTER=again"),
+]
+
+
+@pytest.mark.parametrize("name,scenario,script,expect",
+                         SWEEP, ids=[c[0] for c in SWEEP])
+def test_every_screen_survives_and_gives_the_terminal_back(name, scenario,
+                                                           script, expect):
+    out = drive(script, scenario=scenario)
+
+    assert "CHILD-ERROR" not in out, f"{name}: console raised\n{out[-600:]}"
+    assert END in out, f"{name}: never finished -- hung or exited early"
+    assert "RESTORED=True" in out, (
+        f"{name}: left the terminal in raw mode; a shell after this is "
+        f"unusable")
+    assert expect in out, (
+        f"{name}: expected {expect!r}, which means the keys did not land "
+        f"where they should have\n{out[-600:]}")
+
+    # No keypress may reach the screen as a literal escape sequence. Strip the
+    # sequences the console itself emits, then look for what is left over.
+    import re
+    leftover = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
+    leftover = leftover.replace("\x1b[?1049h", "").replace("\x1b[?1049l", "")
+    assert "^[" not in leftover, f"{name}: raw escape echoed to the screen"
+    assert "\x1b[B" not in leftover, f"{name}: an arrow key leaked through"
+
+
+def test_the_real_frame_disables_the_wheel_on_a_real_terminal():
+    """The unit test proves the bytes are composed; this proves they are
+    actually written to a terminal by the path production uses."""
+    out = drive(keys(b"q"), scenario="select")
+    assert "\x1b[?1007l" in out, (
+        "alternate scroll left enabled: the wheel still arrives as arrow keys")
+    assert "\x1b[?1000l" in out and "\x1b[?1006l" in out, (
+        "mouse reporting left enabled: the wheel still arrives as bytes")
+
+
+def test_the_clarifying_question_draws_once_and_returns_the_answer():
+    """clarify() draws a panel and then opens the editor, which draws its
+    own -- an easy way to end up with the question on screen twice."""
+    out = drive(keys(b"src/parser.py", TAB), scenario="clarify")
+
+    assert "CLARIFY=src/parser.py" in out, "the answer was not captured"
+    visible = __import__("re").sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
+    assert visible.count("Which file should I start from?") == 1, \
+        "the question was drawn more than once"
+
+
+def test_skipping_the_question_is_allowed():
+    out = drive(keys(ESC_B), scenario="clarify")
+    assert "CLARIFY=None" in out, "esc must skip rather than block the run"
+
+
+# -- the permission gate, driven through a real terminal --------------------
+
+@pytest.mark.parametrize("key,expected,decision", [
+    (TAB, "True", "allowed"),
+    (b"y", "True", "allowed"),
+    (ESC_B, "False", "declined"),
+    (b"q", "False", "declined"),
+    (b"n", "False", "declined"),
+])
+def test_the_gate_asks_and_honours_the_answer(key, expected, decision):
+    """Installing reaches a registry and runs foreign code, so the answer
+    given at the terminal has to be the answer that is acted on."""
+    out = drive(keys(key), scenario="gate_install")
+    assert f"CONSENT={expected}" in out, f"{key!r} was not honoured"
+    assert f"DECIDED={decision}" in out
+    visible = __import__("re").sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
+    assert "Permission needed" in visible, "no card was shown to the operator"
+
+
+def test_a_decided_policy_does_not_interrupt(monkeypatch):
+    """HARNESS_AUTO already answered; asking again would be noise."""
+    import os
+    os.environ["HARNESS_AUTO"] = "install"
+    try:
+        out = drive([], scenario="gate_install")
+    finally:
+        os.environ.pop("HARNESS_AUTO", None)
+    assert "CONSENT=True" in out and "DECIDED=auto" in out
+    visible = __import__("re").sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
+    assert "Permission needed" not in visible, "asked despite HARNESS_AUTO"
+
+
+def test_the_status_line_keeps_ticking_during_a_phase():
+    """In the frame, working() used to paint once and return, so the elapsed
+    time and token count froze at the instant the phase began -- a
+    four-minute verify read the same number throughout."""
+    import re as _re
+
+    pid, fd = pty.fork()
+    if pid == 0:                                       # pragma: no cover
+        try:
+            _reattach_std()
+            sys.path.insert(0, str(ROOT))
+            import time as _time
+
+            from harness import config as C
+            from harness import console as Console
+            from harness.logging_ui import Logger
+
+            cfg = C.Config(api_key="sk-ant-api03-FAKETICK", issue="",
+                           repo_path=ROOT)
+            log = Logger(rich=True)
+            ui = Console.Console(log=log, cfg=cfg)
+            ui.take_terminal()
+            started = _time.time()
+            log.bind_counters(lambda: f"   {_time.time() - started:.0f}s")
+            log.working("verifying")
+            _time.sleep(2.6)
+            log.done_working()
+            ui.release_terminal()
+            sys.stdout.write(f"\n{END}\n")
+            sys.stdout.flush()
+        except BaseException:
+            pass
+        finally:
+            os._exit(0)
+
+    out = b""
+    deadline = time.time() + 12
+    try:
+        while time.time() < deadline:
+            r, _, _ = select.select([fd], [], [], 0.2)
+            if not r:
+                continue
+            try:
+                data = os.read(fd, 8192)
+            except OSError:
+                break
+            if not data:
+                break
+            out += data
+            if END.encode() in out:
+                break
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+    text = out.decode("utf-8", "replace")
+    seen = sorted({int(s) for s in _re.findall(r"(\d+)s", text)})
+    assert len(seen) >= 3, f"the counter did not advance: saw {seen}"
+    assert "verifying" in _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
