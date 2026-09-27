@@ -32,16 +32,32 @@ Run `make run` at a terminal with no issue and it asks:
 
     What should I work on?
 
-  ▸ paste an issue                  multi-line, Ctrl-D to finish
+  ▸ paste an issue                  write it in place, tab when done
     github issue or pull request    owner/repo#123
-    a local repository              /work/acme-api
+    a local repository              @ to search, or pick below
     recent                          3 previous run(s)
 
     ↑↓ move   tab run   q quit
 ```
 
-After a run it offers the diff, the full report, posting the report back to
-the issue, or another run.
+Typing `@` anywhere you would start typing opens the repository finder: it
+scans for git checkouts once, caches them, and filters as you type. `@hh`
+finds `harness-hackathon`, `@wsb` finds `ws-backend-sep` -- initials, prefix,
+substring and subsequence all match, best first. 133 repositories in 0.4s
+cold and 28ms warm, so it never makes you wait.
+
+After a run it offers the diff, the full report, opening a pull request,
+posting the report back to the issue, or another run.
+
+Arrow keys move, `tab` runs, `esc` goes back, `q` quits. The mouse wheel does
+nothing on purpose: the frame turns off every mouse reporting mode and
+alternate scroll while it is up, so a scroll cannot move the selection or
+close the console. Text selection still works, which is why mouse reporting
+is left off rather than captured. To see what your terminal really sends:
+
+```bash
+python -m harness.keys     # press keys and scroll; a scroll should print nothing
+```
 
 This is not a mode and it is not labelled as one: it is what the CLI does
 when it has a terminal and no issue, the same way `git` pages and `ls`
@@ -80,8 +96,65 @@ HARNESS_POST=comment make run ISSUE="owner/repo#123"
 ```
 
 That posts the run report as a comment, and only when the run produced a
-verified fix. The harness never pushes code: `git push` stays on the deny
-list, so you review the diff and open the PR yourself.
+verified fix.
+
+### Permission
+
+Four things reach outside this machine: cloning a repository, pushing a
+branch, opening a pull request, posting a comment. Each one asks first:
+
+```
+  ! Permission needed
+    open a pull request
+
+    repository    acme/dateparse
+    branch        harness/issue-77
+    commit        fix(parser): handle dates with no separator
+    changes       src/dateparse/parser.py  (+2 -0)
+
+    tab allow   esc decline
+```
+
+Everything else -- reading, editing, running tests -- is local and
+reversible, so it runs freely. Gating it would make the harness useless
+without making it safer.
+
+`HARNESS_AUTO` configures this, and the default is to ask:
+
+| `HARNESS_AUTO` | effect |
+|---|---|
+| unset / `ask` | ask before each outward-facing action *(default)* |
+| `auto` | allow all four unattended |
+| `pr,push` | allow exactly those, ask for the rest |
+| `never` | refuse all four, even when asked for directly |
+
+An unrecognised value is treated as `ask`, never as permission. Naming a
+repository on the command line is itself consent to clone that one, so
+scripted runs work without `HARNESS_AUTO`; push and PR still need it.
+
+`git push` stays on the deny list for model-issued commands throughout. The
+harness issues it itself, once, after the gate passes.
+
+### The pull request
+
+With permission, a verified fix becomes a pull request: a conventional-commit
+subject, and a body carrying the root cause, the diff summary, the
+verification results and the confidence report, closing the issue it fixes.
+
+```bash
+make run ISSUE="owner/repo#123" PR=True
+```
+
+`PR=True` pushes the branch and opens the pull request, but only when the fix
+verifies. `PR=False` forbids it outright. Leave `PR` unset and the default
+applies: ask at a terminal, decline when there is nobody to ask. Cloning and
+installing happen either way -- they are how the repository gets read and run
+at all.
+
+`HARNESS_AUTO` is the same switch with finer grain, if you want (say) comments
+but not pushes.
+
+It never fires on a run without a verified fix.
 
 That is the whole interface. `make setup` creates a virtualenv and prints a
 readiness report; `make run` executes the pipeline and prints the fix, the
@@ -142,6 +215,124 @@ Key properties:
 
 ---
 
+## Which model it picks
+
+With a single-vendor key the choice is obvious. With an aggregator it is not:
+an OpenRouter key lists several hundred models from every vendor, and the
+harness has to choose two -- one to do the work, one to judge it.
+
+| | how it is chosen |
+|---|---|
+| primary | provider's own ranking, else known coding families, then the **newest version** within that family |
+| cheap | the **published input price**, when the provider states one |
+
+Two things follow that are worth knowing:
+
+- **Prices decide the cheap model, not a list of names.** Any hardcoded
+  "small models" list is a guess about a catalogue that changes weekly. Where
+  a provider publishes no pricing, the fallback matches the naming convention
+  (`mini`, `nano`, `flash`, `micro`, `haiku`) rather than specific versions,
+  because the convention outlives them.
+- **Batch, preview and modality variants are skipped.** A `:batch` endpoint
+  accepts work and answers later, which a fix-and-verify loop cannot use; a
+  vision or audio variant spends capacity on a modality this harness never
+  touches.
+
+The cheap model still has to hold a diff, so it needs a 64k window whatever
+it costs. Both choices are printed at startup, and `HARNESS_MODEL` /
+`HARNESS_CHEAP_MODEL` override them outright -- those are not validated
+against the listing, because a proxy may serve ids it does not advertise.
+
+---
+
+## When the repository has no tests
+
+Most repositories don't have a suite, and a harness that can only verify a fix
+when somebody else already wrote the test isn't autonomous. So the harness
+writes the test itself.
+
+The catch is obvious: a model asked to check its own work writes a test that
+passes. The answer is red-green, and the red half is the whole point:
+
+```
+  ▸ P2  writing a test: this repository has none
+  ◆ reproduction    fails on the unfixed code  (node --test harness_repro.test.js)
+  ...
+  ✓ reproduction    passes after the fix
+```
+
+1. It writes a test from the issue, **before any fix exists**.
+2. It runs it against the unfixed code. **The test must fail.**
+3. If it passes, it's thrown away — it doesn't describe the bug, however
+   plausible it looks — and rewritten once with that feedback.
+4. Only then does the fix go in, and the same test must go green.
+
+A test that was green before the fix proves nothing about the fix. Rejecting
+it is what makes this evidence rather than the model's opinion of itself. A
+file that doesn't parse is rejected too: a syntax error also exits non-zero,
+and would otherwise look like a reproduction of nothing.
+
+Nothing needs installing. `node --test` ships with Node 18 and `unittest` is
+in the Python standard library, so a repository with no test tooling at all is
+still verifiable.
+
+The reproduction is scaffolding, not output: it's excluded from the change set
+and deleted before the diff is taken, so a model-written test never lands in
+your patch or your pull request.
+
+| `HARNESS_REPRO` | |
+|---|---|
+| `auto` *(default)* | write one only when no suite was found |
+| `always` | write one as a second opinion alongside the suite |
+| `off` | never |
+
+Where a suite exists it wins — a written test can't override it. But a
+reproduction that was red before the fix and is **still red after it** fails
+the run outright, whatever the suite says, because that's direct evidence the
+fix didn't work.
+
+---
+
+## Working on a repository it has never seen
+
+Cloning someone's repository is the normal case, so the things that only
+happen there are handled rather than assumed away.
+
+**It installs the dependencies.** A fresh clone has no `node_modules` and no
+virtualenv, so the suite can't start — `jest: command not found`. That used to
+read as a failing suite. Installing asks first, because it fetches from a
+public registry and `npm install` runs a `postinstall` script from every
+transitive dependency:
+
+```
+  ! Permission needed
+    install this repository's dependencies
+
+    repository    acme-api
+    command       npm ci --ignore-scripts
+    scripts       disabled (--ignore-scripts)
+
+    tab allow   esc decline
+```
+
+Scripts are off unless you ask for them (`HARNESS_INSTALL_SCRIPTS=1`); the
+lockfile picks the package manager. Decline and the run continues, saying the
+suite may not run. `npm install` stays on the deny list for anything the model
+asks for — the harness runs it itself, after you say yes.
+
+**It can add, remove and move files.** Not every fix lives in a file that
+already exists. New paths have to be named in the plan, have to look like
+source in that repository, and a rename's destination is scope-checked like
+any other write — so a file can't be moved somewhere the plan never mentioned.
+
+**It asks, once, when it has to.** An issue that names no file, no symbol and
+no error can't be localized, and guessing is how you get a confident wrong
+patch. At a terminal it asks one question and carries on with your answer.
+Unattended it still declines — making up an answer to its own question is
+worse than stopping.
+
+---
+
 ## Configuration
 
 Only `AI_API_KEY` is required. Everything else has a sensible default.
@@ -155,6 +346,10 @@ Only `AI_API_KEY` is required. Everything else has a sensible default.
 | `ISSUE` / `ISSUE_FILE` | stdin | the issue text; also accepted as `argv[1]` |
 | `REPO_PATH` | `$PWD` | the repository to fix (ignored when `ISSUE` is a GitHub reference) |
 | `GITHUB_TOKEN` / `GH_TOKEN` | — | private repositories, and 5000 instead of 60 API requests an hour |
+| `HARNESS_INSTALL_SCRIPTS` | `0` | let dependency install scripts run |
+| `HARNESS_EXPLORE_ROUNDS` | `1` | extra investigation rounds on a weak root cause |
+| `HARNESS_REPRO` | `auto` | write a reproduction test when the repo has no suite; `always` or `off` |
+| `HARNESS_AUTO` | `ask` | `auto`, `never`, or a comma list like `pr,push`: which outward-facing actions may proceed unattended |
 | `HARNESS_POST` | `off` | `comment` posts the run report back to the issue or PR |
 | `HARNESS_WORKSPACE` | `./.harness/workspace` | where cloned repositories land |
 | `HARNESS_CLONE_DEPTH` | 0 (full) | shallow clone depth; full history is needed for FR-16 |

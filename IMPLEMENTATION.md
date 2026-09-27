@@ -219,6 +219,28 @@ Not required for correctness; this is where the "evidence" and "efficiency" crit
 | T9.7 | Co-change mining | §21.4 | improves localization on `py-vague` |
 | T9.8 | tree-sitter tags + PageRank repo map — **last**, and only if SBFL proved insufficient | §4.3 | improves `py-vague` / `py-upstream` in the T0 column |
 
+### 11.1 WP9+ — Console and autonomy  *(delivered)*
+
+Built after the shippable line held, so none of it can put WP0–WP7 at risk.
+These deepen FR-1 (how the issue arrives) and FR-2 (autonomy through to
+submission); they introduce no new PRD obligations, so §14 is unchanged.
+
+| ID | Task | File | Spec | Verification | PRD |
+|---|---|---|---|---|---|
+| T11.1 | Repository finder on `@`: bounded scan, disk cache, 5-tier ranking | `finder.py` | §37.1 | `test_finder.py`; 133 repos 0.38 s cold / 28 ms warm; `@harn` must not match `Asynchronous-File-Concatenator` | FR-1 |
+| T11.2 | Consent gate over the four outward actions; `HARNESS_AUTO`; requested-clone semantics | `consent.py` | §37.2 | `test_consent_pr.py`: unattended push/pr refused, `pr,push` allows exactly two, `never` overrides a requested clone, unparsed value ⇒ ask | FR-2 |
+| T11.3 | Auto-PR: conventional subject ≤70 incl. prefix, evidence body, `Closes #N`, `gh` then REST | `pullrequest.py` | §37.3 | `test_consent_pr.py`; never fires without a verified fix | FR-2, FR-3 |
+| T11.4 | Terminal audit: every screen and transition driven through a pty | `test_console_pty.py` | §37 | 17 scenarios × {terminal restored, no escape echo, no crash}; mouse scroll inert everywhere including pagers | FR-1 |
+
+**Mouse scroll.** Fixed at the source: the frame resets every mouse mode
+(`1000/1002/1003/1005/1006/1015`) and alternate scroll (`1007`) on entry, so
+the wheel produces no input at all. Discarding the sequences in the parser
+was not enough on its own — it only covers the encodings anticipated, while
+the inherited terminal state decides which one actually arrives. The parser
+still discards X10 and SGR reports as a second line of defence, and
+`python -m harness.keys` shows what a given terminal really sends.
+
+
 ---
 
 ## 12. WP10 — Gates  *(D2 final 2 h, MANDATORY, reserved)*

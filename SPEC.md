@@ -1771,6 +1771,230 @@ Scoped selection already has a five-step ladder (§9.3), so "scoped" is reliable
 
 Before regenerating an edit that failed to apply, **re-read the target file.** A failed anchor match is often not a bad edit but a stale view — an earlier hunk in the same cycle already changed those lines. Re-read, then regenerate with the current content. This precedes the format de-escalation step and frequently makes it unnecessary.
 
+### 26.4 No command is a result, not an exception (CORE)
+
+A repository with no test suite is ordinary — a service, a script, a
+prototype. Three separate defects turned that ordinary case into a hung run,
+and each was individually enough to stop the harness dead:
+
+| Defect | Symptom | Rule |
+|---|---|---|
+| discovery names a framework that is not one | `npx node` opens a REPL | an undetected framework is `""`, and **no** command is emitted |
+| a command inherits the harness's stdin | the REPL waits on the operator's own terminal, stealing keystrokes | every subprocess runs with `stdin=/dev/null`, with no exceptions |
+| the command is `None` | `TypeError` from inside `subprocess`, killing the run | an empty command returns exit 127, `"no command to run"` |
+
+The banner states `test command: none found` rather than omitting the line.
+Silence there is indistinguishable from a suite that passed, and whether
+anything verifies the fix is the single most important fact about a run.
+Verification then degrades to lint, syntax and judges (§15), and C3 cannot
+pass — which is the honest outcome, not a failure to report.
+
+### 26.5 TAP (CORE — amends §9.4)
+
+`node --test` is the default JavaScript runner and speaks TAP, as do `tap`
+and `ava`. §9.4's ladder had no TAP reader, so the regex fallback matched
+nothing and a suite with real failures parsed as **zero tests** — which
+classification reads as "nothing failed" rather than "nothing was read". This
+is the §9.4 zero-test hazard arriving through a different door.
+
+The reader takes the test *name* as the id, because that is what a plan and a
+baseline diff refer to; a bare number is used only for an unnamed test. Two
+TAP-specific rules matter:
+
+- a parent reported after its subtests must not overwrite a failure already
+  recorded under the same name — nested subtests repeat numbering;
+- when the count parsed disagrees with the runner's own `1..N` or `# tests N`,
+  confidence drops to low, which promotes the diff-sanity judge to blocking
+  rather than trusting a partial read.
+
+### 26.6 The harness writes its own test (NEW, CORE — replaces §25.2)
+
+Most repositories have no suite. §9 assumed one throughout, so on an ordinary
+repository C3 could never pass and the harness could never finish its work —
+correct, and useless. §25.2 anticipated this and left it as ENH; it is CORE.
+
+The objection to a self-written test is obvious: a model asked to check its
+own work writes a test that passes. The answer is **red-green**, and the red
+half is not optional:
+
+| Step | Check | If it fails |
+|---|---|---|
+| 1 | write a test from the issue, before any fix exists | regenerate once, then drop the gate |
+| 2 | run it against the **unfixed** code — it must **FAIL** | **rejected**: it does not describe the bug |
+| 3 | the file must actually have run | rejected — a syntax error also exits non-zero |
+| 4 | apply the fix | — |
+| 5 | run it again — it must **PASS** | the fix did not work (C3 fails) |
+
+Step 2 is the entire mechanism. A test that is green before the fix says
+nothing about the fix, however plausible it looks, so it is discarded no
+matter how confident the model is. What survives is machine-checked evidence
+rather than an assertion — the same standard §11 applies everywhere else.
+
+Step 3 exists because a file that does not parse also exits non-zero, and
+would otherwise be accepted as a reproduction of nothing.
+
+No test framework need be installed. Both runtimes ship one — `node --test`
+from Node 18, and `unittest` in the Python standard library — so a repository
+with no test tooling at all is still verifiable. A real framework is
+preferred when the repository already has one, because its output parses at
+high confidence.
+
+| Setting | `HARNESS_REPRO` | Why |
+|---|---|---|
+| **default** | `auto` | write one only when no suite was discovered: an existing suite is better evidence, and a written test costs a call |
+| | `always` | write one regardless, as a second opinion beside the suite |
+| | `off` | never |
+
+**How C3 uses it.** A proven reproduction substitutes for a suite only where
+there is no suite. Where a suite exists it cannot override it — but a
+reproduction that was red before the fix and is *still* red after it fails C3
+outright, whatever the suite says, because that is direct evidence the fix did
+not work.
+
+**It is scaffolding, not a deliverable.** The file is written at the
+repository root so its imports are the ordinary ones, excluded from
+`changed_files()` so it can never fail C4, and deleted before the diff is
+taken — so a model-written test cannot reach a patch, a report or a pull
+request by accident. Committing one is a separate, explicit decision.
+
+
+### 26.7 Dependencies (NEW, CORE)
+
+A cloned repository has no `node_modules` and no virtualenv, so its suite
+cannot start: `jest: command not found`, exit 127. §9 read that as a red
+baseline; it is not a baseline at all. Installing therefore runs **before**
+the baseline, and the toolchain is re-discovered afterwards, because it was
+first read against a repository that could not run anything.
+
+Installing is gated like a push rather than run freely. It is local, but it
+reaches a public registry and `npm install` executes a `postinstall` script
+from every transitive dependency — the same class of act as pushing, not the
+same class as editing a file.
+
+| Rule | Why |
+|---|---|
+| `--ignore-scripts` by default | the install scripts are the dangerous part; `HARNESS_INSTALL_SCRIPTS=1` re-enables them deliberately |
+| lockfile chooses the manager | `npm ci` / `yarn --frozen-lockfile` / `pnpm --frozen-lockfile` are reproducible |
+| `npm ci` falls back to `npm install` | `ci` refuses outright when the lockfile drifted — a repository problem, not a reason to stop |
+| already installed ⇒ untouched | an **empty** `node_modules` still counts as missing |
+| declined ⇒ degrade, not fail | `no_deps`; the run continues and says the suite may not run |
+
+`npm install` and `pip install` stay on the runner's deny list throughout.
+That list governs commands the *model* asks for; the harness issues this one
+itself after the gate returns true, exactly as §37.2 does for push.
+
+### 26.8 Creating, deleting and moving files (NEW, CORE — amends §8)
+
+§8 assumed every edit targets a file that already exists, so a fix needing a
+new module was work the harness handed back. Three path operations are now
+available in every edit format:
+
+```
+<<<<<<< CREATE path/to/new_file.ext      <<<<<<< DELETE path/to/old.ext
+(contents)                               >>>>>>>
+>>>>>>>                                  <<<<<<< RENAME old.ext -> new.ext
+                                         >>>>>>>
+```
+
+They are staged before content edits — they decide whether a file exists at
+all — and committed in the same atomic set. **Rollback undoes them in
+reverse**, so a rename is put back before its old path is rewritten.
+
+| Guard | Failure it prevents |
+|---|---|
+| CREATE over an existing file is refused | silently discarding that file's contents |
+| RENAME onto an existing file is refused | the same, by another route |
+| a file created in the reply may be edited in it | otherwise a two-step change needs two cycles |
+| the RENAME **destination** is scope-checked | a file could otherwise be moved anywhere the plan never named |
+| a new path must be relative, in-repo, source, non-test | `/etc/passwd`, `../x`, lockfiles and tests cannot reach the allow list |
+
+A new file must be named in the plan with `"new_file": true`, and the syntax
+above is shown to the implementer **only when the plan calls for one** —
+offered unconditionally, a model creates a file instead of making the small
+edit it was asked for.
+
+### 26.9 Looking again (NEW, ENH — amends §21)
+
+Investigation already lets the model choose what to check; the harness
+executes it (§7.2). The loop only re-opened when *every* hypothesis was
+refuted, so a confirmed-but-weak root cause was final — precisely where a
+person would go and read one more file. One further round of model-chosen
+checks now runs when the synthesized root cause is low-confidence.
+`HARNESS_EXPLORE_ROUNDS` bounds it: 1 by default, capped at 3, because a
+vague issue must not spend the whole budget on investigation.
+
+### 26.10 One question (NEW, ENH)
+
+An issue naming no file, no symbol and no error cannot be localized, and
+guessing at it is how a harness produces a confident wrong patch. When a
+human is present the console asks one question and re-triages with the
+answer. **Unattended it still declines**: inventing an answer to its own
+question would be worse than stopping. A grounded issue is never
+interrupted.
+
+
+### 26.11 Reasoning models (NEW, CORE — amends §2.3)
+
+The evaluation uses DeepSeek and Qwen. Both ship reasoning variants —
+`deepseek-reasoner` / R1, Qwen's `*-thinking` and QwQ — and both put their
+working out in the reply. Nothing stripped it, so on exactly the models
+being graded a JSON reply would not parse and an edit block would arrive
+behind a monologue.
+
+| Shape | Where | Handling |
+|---|---|---|
+| `<think> … </think>` inline before the answer | most gateways, incl. OpenRouter | removed at the wire |
+| `<thinking>`, `<reason>`, `<reasoning>` | Qwen variants | same |
+| unterminated `<think>` (reply cut at max_tokens) | any | reply is **empty**, not the monologue |
+| separate `reasoning_content` field | DeepSeek's own API | ignored; `content` is the answer |
+
+Stripping happens in the adapter so no phase needs to know which model it is
+talking to. A model that spends its whole budget reasoning returns nothing,
+which is the honest result: the caller retries or degrades rather than
+parsing thought as a fix.
+
+### 26.12 Tier is bounded by the context window (NEW, CORE — amends §3.4)
+
+A tier is a promise about how much of the window a profile will use — T2
+budgets 75% of it. `deepseek-r1-distill-llama-70b` read as T2 on the token
+"r1" while shipping an **8k** window, which that profile cannot honour.
+
+Two rules, both general rather than model-specific:
+
+- a distillation never inherits the parent's tier; it is a smaller model
+  wearing a larger model's name;
+- the tier is capped by the measured window: below 16k it is T0, and below
+  33k it cannot be T2.
+
+Context fallbacks were also refreshed from the live catalogue. The previous
+`deepseek=65k` / `qwen=32k` floors under-budgeted current models by up to
+twenty times whenever a provider reported no window.
+
+### 26.13 External factors: relevance and severity (amends §11)
+
+C6 asked "were external factors ruled out", and `ruled_out` meant "no
+findings at all". On any repository with an unset environment variable —
+most of them — that failed every run. Two corrections, both using
+information the probes already produced:
+
+| Rule | Reason |
+|---|---|
+| a finding blocks only if it touches a changed or root-cause file | a missing `FIREBASE_PRIVATE_KEY` says nothing about a pure function in `dashboardStats.js` |
+| a **low**-severity finding never blocks | "2 manifest change(s) in the last 90 days" is context, not a fault — and it failed a run whose every other gate was green |
+
+A finding naming no file is repo-wide (a dependency skew) and still blocks
+at medium or high severity.
+
+### 26.14 A cycle that cannot make progress (NEW, ENH — amends §10.2)
+
+§28's stuck detection escalates after two triggers, which is right for a
+failure that might resolve. It is wrong for a cycle whose diff **and**
+blocking conditions are both unchanged: the prompt is identical, so the
+reply is identical — the trajectory records it as `replayed`, straight from
+the cache. The loop now ends there, keeping the best attempt. Both halves of
+the signature matter: the same diff against a *new* blocker is new
+information and still earns a cycle.
+
 ---
 
 ## 27. Failure taxonomy and recovery dispatch (NEW, CORE)
@@ -2005,6 +2229,10 @@ The final two hours are reserved and non-negotiable. The most common way to lose
 | `HARNESS_PARALLEL` | auto | candidate worktree parallelism (§25.1) |
 | `HARNESS_KNOWN_GOOD` | — | ref to bisect against (§21.3) |
 | `HARNESS_REPLAY` | — | trajectory path to replay (§30.2) |
+| `HARNESS_AUTO` | `ask` | which outward-facing actions may proceed unattended (§37.2) |
+| `HARNESS_REPRO` | `auto` | write a reproduction test: `auto` when no suite, `always`, `off` (§26.6) |
+| `HARNESS_INSTALL_SCRIPTS` | `0` | allow dependency install scripts to run (§26.7) |
+| `HARNESS_EXPLORE_ROUNDS` | `1` | extra investigation rounds on a weak root cause, max 3 (§26.9) |
 
 ---
 
@@ -2023,7 +2251,120 @@ The final two hours are reserved and non-negotiable. The most common way to lose
 
 ---
 
-## 37. Additional references
+## 37. Interactive console additions (NEW, ENH — amends §11)
+
+### 37.1 Repository finder
+
+`@` at the start of any input opens a finder over local git checkouts. The
+constraint is that it must never make the operator wait, so discovery is
+bounded rather than exhaustive:
+
+| Bound | Value | Why |
+|---|---|---|
+| `HOME_DEPTH` | 2 | `~` holds hundreds of entries; checkouts sit shallow |
+| `DEEP_DEPTH` | 4 | named project roots are worth descending |
+| `TIME_BUDGET` | 3.0 s | a partial list beats a stalled prompt |
+| `LIMIT` | 300 | beyond this, filtering is the answer, not scrolling |
+
+A directory is a checkout iff `.git` exists — one `stat`, no walk inside it,
+which is what keeps the scan cheap. Results are cached; the cache is the
+common path (0.38 s cold, 28 ms warm over 133 repositories).
+
+Ranking is tiered, best tier first; within a tier, ties break on most
+recently modified, then name:
+
+| Tier | Match | Example |
+|---|---|---|
+| 1 | name prefix | `@harn` → `harness-hackathon` |
+| 2 | name substring | `@ness` → `harness-hackathon` |
+| 3 | initials over `-`/`_`/case splits | `@hh` → `harness-hackathon` |
+| 4 | tight subsequence | `@hhak` → `harness-hackathon` |
+| 5 | path substring | `@work` → `/work/acme-api` |
+
+Tier 4 is bounded by **span**, not merely by order: the matched characters
+must fall inside `max(3 × len(query), 8)` characters. That bound is what
+stops `@harn` matching `Asynchronous-File-Concatenator` — a plain
+subsequence test accepts almost anything, and the ranking becomes noise.
+
+### 37.2 Consent gate
+
+Only actions that leave the machine are gated: `clone`, `push`, `pr`,
+`comment`. Local edits and test runs are reversible, and gating them would
+cost the harness its autonomy without buying safety.
+
+| `HARNESS_AUTO` | Behaviour |
+|---|---|
+| unset, `ask`, `0`/`off`/`false`/`no` | ask before each outward action *(default)* |
+| `auto`, `1`/`on`/`true`/`yes`/`all` | allow all four unattended |
+| comma list, e.g. `pr,push` | allow exactly those; ask for the rest |
+| `never`, `none`, `offline` | refuse all four, including requested clones |
+| anything else | **ask** — an unparsed value is never read as permission |
+
+Two rules make the gate usable without weakening it:
+
+- **Naming is consent, for that one act.** `make run ISSUE="owner/repo#123"`
+  is an instruction to clone that repository, so the clone proceeds
+  (`requested=True`) without `HARNESS_AUTO`. It does not extend to pushing.
+- **Unattended is not permission.** With no TTY and no `HARNESS_AUTO`, an
+  un-requested outward action is refused, not assumed. `never` overrides even
+  a requested clone.
+
+`git push` remains on the model-issued command deny list (§31) throughout.
+The harness issues it directly, once, after the gate returns true — the model
+never gains the capability.
+
+### 37.3 Pull request
+
+A verified fix can become a pull request. Preconditions, all required:
+
+| Condition | Reason |
+|---|---|
+| a resolved GitHub ref | there is somewhere to open it |
+| status is not a failure | never propose a fix that did not verify |
+| the working tree has changes | an empty PR is noise |
+| gate allows `push`, then `pr` | two acts, two decisions |
+
+The title is a conventional-commit subject, budgeted so the **whole** subject
+including the `fix(scope): ` prefix fits in 70 characters. The body carries
+the root cause, the diff summary, the verification results and the confidence
+report, and ends with `Closes #N` so the issue closes on merge — the same
+evidence as the run report (§30), addressed to a reviewer instead of an
+evaluator.
+
+`gh pr create` is used when `gh` is installed, because it already holds the
+operator's auth; otherwise the REST API is called directly, as everywhere
+else (§2.3).
+
+### 37.4 The wheel
+
+Scrolling must never change what the console is doing. A full-screen app
+inherits the terminal's mouse state from whatever ran before it, so the
+behaviour is otherwise unpredictable per terminal:
+
+| Inherited mode | What a scroll becomes | Consequence |
+|---|---|---|
+| reporting off, alternate scroll off | nothing | correct |
+| reporting on (1000/1002/1003) | `ESC [ M` + 3 raw bytes, or SGR | column 81 encodes as `q` — **the console quits** |
+| alternate scroll on (1007) | `ESC [ A` / `ESC [ B` | the selection moves on its own |
+
+The frame therefore sets the state explicitly on entry rather than inheriting
+it — `1000l 1002l 1003l 1005l 1006l 1015l 1007l` — so the wheel generates no
+input at all. `1007` is restored on exit; it only applies inside the
+alternate buffer, which is being left.
+
+The parser's mouse handling stays as a second line of defence for terminals
+that ignore those resets: X10 consumes exactly six bytes, and any other CSI
+is consumed to its terminator and discarded. `python -m harness.keys` prints
+what a given terminal actually sends, so the assumption is checkable rather
+than assumed.
+
+Mouse *reporting* is deliberately not enabled. Doing so would let the pager
+scroll, but it takes text selection away from the operator — a worse trade
+in a tool whose output people copy.
+
+---
+
+## 38. Additional references
 
 15. AutoCodeRover — SBFL-augmented issue context; 38.4 % SWE-bench Lite, 30.67 % Verified. See also *Dissecting the SWE-Bench Leaderboards*, arXiv 2506.17208.
 16. CodeR — hybrid SBFL + BM25 file-level localization, 28.33 % SWE-bench Lite. arXiv 2506.17208.
