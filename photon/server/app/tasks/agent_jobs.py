@@ -27,10 +27,17 @@ log = structlog.get_logger()
 
 
 def _token_for(repo: Repo) -> Optional[str]:
+    """The GitHub App installation that the repo was imported through — and
+    nothing else. The deployment-wide GITHUB_TOKEN used to be the fallback,
+    so a member who registered ANY repo URL could have Photon plan against,
+    read, and open pull requests on whatever that token could reach,
+    including other tenants' private repositories. A repo without an
+    installation can still be planned against if it is public (the clone
+    needs no token); it cannot be published to."""
     if repo.github_installation_id:
         from app.services.github_app_auth import get_installation_token
         return get_installation_token(repo.github_installation_id)
-    return get_settings().github_token or None
+    return None
 
 
 def _save(job_id: str, **fields) -> AgentJob:
@@ -164,10 +171,16 @@ def fix_agent_job(self, job_id: str) -> dict:
                             f"the report is in the console: {_console_url(job_id)}")
         return {"status": job.status, "reason": why}
 
+    token = _token_for(repo)
+    if not token:
+        reason = ("verified, but this repository was not imported through the GitHub App, "
+                  "so Photon has no permission to push a branch or open a pull request")
+        job = _save(job_id, result=result, status=AgentJobStatus.ESCALATED.value, escalation_reason=reason)
+        return {"status": job.status, "reason": reason}
     try:
         pr = harness.publish(
             run_id,
-            token=_token_for(repo) or "",
+            token=token,
             branch=rules.branch_name(job_id, job.title),
             title=job.title if not job.ticket_ref else f"{job.title} ({job.ticket_ref})",
             body=rules.pr_body(title=job.title, ticket_ref=job.ticket_ref,

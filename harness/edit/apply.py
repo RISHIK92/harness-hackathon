@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..repo.paths import in_repo
 from .formats import (CREATE, DELETE, EDIT, LINE_RANGE, RENAME,
                       SEARCH_REPLACE, WHOLE_FILE, Edit)
 
@@ -175,10 +176,30 @@ def _ensure_newline(text: str) -> str:
     return text if text.endswith("\n") or not text else text + "\n"
 
 
+def _contained(repo: Path, path: str, index: int) -> None:
+    """Refuse a path outside the repository BEFORE anything is written.
+
+    The parser used to strip every leading `.` and `/`, which happened to
+    turn `../x` into `x`; a `..` further in (`src/../../x`) and a symlink out
+    of the tree were never caught, and the scope check that would have
+    caught them runs after the write. `.git` is refused too: a file written
+    there is a hook the next commit runs.
+    """
+    if in_repo(repo, path) is None:
+        raise EditFailure("apply", f"{path} is outside the repository; "
+                                   f"only paths inside it can be changed",
+                          hunk_index=index, path=path)
+
+
 def apply_all(repo: Path, edits: list[Edit]) -> list[Applied]:
     """Stage every edit in memory, then write. Atomic across files."""
     staged: dict[str, tuple[str, str]] = {}
     ops: list[Applied] = []
+
+    for i, edit in enumerate(edits):
+        _contained(repo, edit.path, i)
+        if edit.op == RENAME:
+            _contained(repo, edit.dest, i)
 
     # Path operations are staged first and separately: they decide whether a
     # file exists at all, which every content edit below then depends on.

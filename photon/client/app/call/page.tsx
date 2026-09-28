@@ -272,24 +272,27 @@ export default function CallPage() {
       // The event stream, not the plain POST: same answer, but the
       // advanced panel gets each plan/tool/compose step as it happens
       // instead of a single silent wait of tens of seconds.
-      // Best-effort: this join page isn't behind login, but if this
-      // browser also has a workspace selected from the dashboard, use it
-      // so the agent can disambiguate across that workspace's repos
-      // instead of falling back to the single seed repo. See CLAUDE.md's
-      // multi-repo disambiguation note — the agent endpoint itself is
-      // still unauthenticated, so this is client-asserted, not verified.
+      // Signed-in members only: the answer carries the evidence it drew on,
+      // so the server resolves the tenant from this session (and, in a
+      // meeting, requires membership of the meeting's workspace). The
+      // workspace id is only a selection among the caller's own workspaces.
+      const token = getToken();
       const workspace_id = getWorkspaceId() || undefined;
-      // The meeting, when we're in one, outranks the client-asserted
-      // workspace: the server resolves the call's configuration from the
-      // slug (persona, and which sources are allowed), and a call that was
-      // set up to exclude a source must not have it reintroduced by
-      // whatever workspace this browser happens to have selected.
       const meeting_slug = meetingCode.trim() || undefined;
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "1",
+      };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      if (workspace_id && !meeting_slug) headers["X-Workspace-Id"] = workspace_id;
       const res = await fetch(`${BRAIN_API_URL}/api/agent/ask/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" },
+        headers,
         body: JSON.stringify({ question, workspace_id, meeting_slug, history }),
       });
+      if (res.status === 401 || res.status === 404) {
+        throw new Error("typing questions is for signed-in members of this workspace — ask out loud instead");
+      }
       if (!res.ok || !res.body) throw new Error(`brain-api returned ${res.status}`);
 
       const reader = res.body.getReader();

@@ -561,18 +561,18 @@ export const disableMock = (provider: MockProvider) =>
  * chunk would print confident, wrong line numbers — the exact failure the
  * panel exists to prevent.
  *
- * `read_file` reads the file off disk, so what it returns really is lines
- * `start..end`. Unauthenticated like the rest of /api/tools (documented
- * demo-scope decision).
+ * The repo file route reads the file off disk, so what it returns really is
+ * lines `start..end`. It is behind the same workspace check as every other
+ * repo route (it replaced an unauthenticated raw tool endpoint).
  */
-const readFileOnce = (repoId: string, path: string, start?: number, end?: number) =>
-  fetch(`${BASE}/api/tools/read_file`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" },
-    body: JSON.stringify({ args: { repo_id: repoId, path, start, end } }),
-  })
-    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`read_file ${r.status}`))))
-    .then((d) => (d?.evidence?.[0]?.snippet as string | undefined) ?? null);
+const readFileOnce = (repoId: string, path: string, start?: number, end?: number) => {
+  const q = new URLSearchParams({ path });
+  if (start) q.set("start", String(start));
+  if (end) q.set("end", String(end));
+  return api<{ evidence?: { snippet?: string }[] }>(
+    `/api/repos/${encodeURIComponent(repoId)}/file?${q.toString()}`,
+  ).then((d) => d?.evidence?.[0]?.snippet ?? null);
+};
 
 /** Every evidence snippet is capped at 800 characters by make_evidence(),
  *  which is right for something being fed to the compose LLM and wrong for

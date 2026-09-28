@@ -216,10 +216,14 @@ def test_no_token_is_still_a_valid_request(monkeypatch):
     assert "Authorization" not in GH._headers()
 
 
-def test_private_clone_url_embeds_the_token(monkeypatch):
+def test_a_private_clone_carries_the_token_as_a_header(monkeypatch):
+    """Never in the URL: `clone` writes the URL into .git/config, where the
+    repository's own tests can read it (D-34)."""
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_FAKEtoken1234567890")
-    url = GH._authed_url("https://github.com/a/b.git")
-    assert url.startswith("https://x-access-token:ghp_FAKEtoken")
+    env = GH.clone_auth_env("https://github.com/a/b.git")
+    assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
+    assert "ghp_FAKEtoken" not in json.dumps(env)        # base64, not plain
+    assert not hasattr(GH, "_authed_url")
 
 
 def test_the_token_is_redacted_from_logs(monkeypatch):

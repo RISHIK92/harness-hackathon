@@ -1,6 +1,7 @@
 """JWT authentication utilities."""
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -43,9 +44,22 @@ def create_access_token(user_id: str, email: str) -> str:
 # A token minted for the Chrome extension (routers/extension.py) carries
 # this scope. It is a whisper-only credential: it lives in a browser
 # extension's storage, so if it leaks it must not open the repos, the agent
-# jobs or the workspace settings — only these routes.
+# jobs or the workspace settings — only exactly the routes the extension
+# calls. A path PREFIX used to be the rule, and "/api/extension/" let a
+# leaked token mint fresh pairing codes (new devices that outlive revoking
+# the leaked one), and "/api/whisper/" let it dispatch paid meeting bots and
+# read other sessions' webhook secrets.
 EXTENSION_SCOPE = "whisper-extension"
-EXTENSION_ROUTES = ("/api/whisper/", "/api/extension/")
+EXTENSION_ROUTES = tuple(re.compile(p) for p in (
+    r"^/api/extension/me$",
+    r"^/api/extension/meet-session$",
+    r"^/api/whisper/sessions/[^/]+/(thread|lines)$",
+    r"^/api/whisper/threads/[^/]+/(messages|ask)$",
+))
+
+
+def extension_may_call(path: str) -> bool:
+    return any(p.match(path) for p in EXTENSION_ROUTES)
 
 
 def create_extension_token(user_id: str, email: str, workspace_id: str, device_id: str,
@@ -62,7 +76,7 @@ async def _check_extension_token(payload: dict, request: Request, session: Async
 
     denied = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                            detail="This extension token cannot be used here")
-    if not request.url.path.startswith(EXTENSION_ROUTES):
+    if not extension_may_call(request.url.path):
         raise denied
     # Pinned to the workspace it was paired in: a header naming another
     # workspace (or none, which would fall back to the personal one) is refused.

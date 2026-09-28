@@ -29,6 +29,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core import service_auth
+
 from app.config import get_settings
 from app.core.auth import get_current_user
 from app.core.workspace import get_current_workspace
@@ -105,12 +107,20 @@ async def _poc(session: AsyncSession, meeting: Meeting) -> tuple[Optional[User],
 
 # ── worker ───────────────────────────────────────────────────────────────
 
+# Both worker routes need the worker's token for the meeting in question.
+# They were open: anyone with a meeting code could put attacker-written
+# questions in a member's inbox (and a Slack DM, once scopes allow it).
+
 @router.post("/assess")
 async def assess(body: AssessBody, background: BackgroundTasks,
-                 session: AsyncSession = Depends(get_session)):
-    meeting = (await session.execute(select(Meeting).where(Meeting.slug == body.meeting_slug))).scalars().first()
+                 session: AsyncSession = Depends(get_session),
+                 worker_token: Optional[str] = Depends(service_auth.worker_token_header)):
+    from app.services.meeting_slug import normalise
+
+    meeting = (await session.execute(select(Meeting).where(Meeting.slug == normalise(body.meeting_slug)))).scalars().first()
     if not meeting:
-        return {"escalate": False, "reason": "unknown meeting"}
+        raise HTTPException(status_code=404, detail="No meeting with that code")
+    service_auth.require_worker(worker_token, service_auth.meeting_scope(meeting.slug))
     poc, name, company = await _poc(session, meeting)
     if not poc:
         return {"escalate": False, "reason": "nobody to escalate to"}
@@ -150,11 +160,13 @@ async def assess(body: AssessBody, background: BackgroundTasks,
 
 
 @router.get("/{escalation_id}/status")
-async def status(escalation_id: str, session: AsyncSession = Depends(get_session)):
+async def status(escalation_id: str, session: AsyncSession = Depends(get_session),
+                 worker_token: Optional[str] = Depends(service_auth.worker_token_header)):
     e = await session.get(Escalation, escalation_id)
-    if not e:
+    meeting = await session.get(Meeting, e.meeting_id) if e and e.meeting_id else None
+    if not e or not meeting:
         raise HTTPException(status_code=404, detail="No such escalation")
-    meeting = await session.get(Meeting, e.meeting_id) if e.meeting_id else None
+    service_auth.require_worker(worker_token, service_auth.meeting_scope(meeting.slug))
     name, company = "the team", False
     if meeting:
         _, name, company = await _poc(session, meeting)

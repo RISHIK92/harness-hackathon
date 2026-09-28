@@ -119,6 +119,7 @@ def _python_needed(repo: Path, toolchain) -> bool:
     interp = python_interpreter(repo, needs=framework)
     if not interp:
         return True
+    # Harness constant on the discovered interpreter; no model text.
     return run(f"{interp} -c \"import {framework}\"", repo, timeout=30,
                check_deny=False).exit_code != 0
 
@@ -213,6 +214,9 @@ def ensure(repo: Path, toolchain, gate, log) -> Install:
 
     log.working(f"installing dependencies ({plan.cmd.split()[0]})")
     before = _snapshot(repo)
+    # The install command is chosen here from the lockfile, never by a
+    # model, and allowed by the consent gate above. The deny list exists to
+    # stop a model running `npm install`; this is the harness doing it.
     result = run(plan.cmd, repo, timeout=TIMEOUT, check_deny=False)
     plan.ran = True
     plan.ok = result.exit_code == 0

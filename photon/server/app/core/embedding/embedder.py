@@ -106,16 +106,19 @@ def _sync_vector_search(
     question. repo_id still wins when given — same single-repo behavior
     as before.
     """
-    qdrant = get_qdrant()
-
-    query_vec = embed_texts([question], input_type="query")[0]
-
     if repo_id:
         query_filter = Filter(must=[FieldCondition(key="repo_id", match=MatchValue(value=repo_id))])
     elif workspace_id:
         query_filter = Filter(must=[FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id))])
     else:
-        query_filter = None
+        # An unfiltered search reads every tenant's code. This used to run
+        # (query_filter=None) whenever a caller passed neither id — a blank
+        # repo_id on the old /api/query was enough. Refused here, in the core,
+        # so no caller can reach it by forgetting a scope.
+        raise ValueError("vector_search needs a repo_id or a workspace_id; an unscoped search is never allowed")
+
+    qdrant = get_qdrant()
+    query_vec = embed_texts([question], input_type="query")[0]
 
     hits = qdrant.search(
         collection_name=COLLECTION,

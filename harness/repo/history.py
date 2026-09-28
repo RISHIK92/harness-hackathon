@@ -5,6 +5,7 @@ the highest-signal cheap step in investigation.
 """
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,13 +40,21 @@ class FileHistory:
 
 
 def _git(repo: Path, args: str, timeout: float = 30.0):
+    # Harness-built git queries, so no deny list. The one variable part is a
+    # path -- and the path can be the model's (a P1 `git` check) or the
+    # issue's -- so it is always passed through `_q`. It used to sit inside
+    # double quotes, where `$(...)` is still a command.
     return run(f"git {args}", repo, timeout=timeout, check_deny=False)
+
+
+def _q(path: str) -> str:
+    return shlex.quote(str(path))
 
 
 def file_history(repo: Path, path: str, n: int = 10,
                  recent_days: int = 90) -> FileHistory:
     fh = FileHistory(path=path)
-    r = _git(repo, f'log -n {n} --format="%h|%ad|%s" --date=short -- "{path}"')
+    r = _git(repo, f'log -n {n} --format="%h|%ad|%s" --date=short -- {_q(path)}')
     if not r.ok:
         return fh
     for line in r.stdout.splitlines():
@@ -54,10 +63,10 @@ def file_history(repo: Path, path: str, n: int = 10,
         if len(parts) == 3:
             fh.commits.append(Commit(*parts))
 
-    rec = _git(repo, f'log --since={recent_days}.days --oneline -- "{path}"')
+    rec = _git(repo, f'log --since={recent_days}.days --oneline -- {_q(path)}')
     fh.recent = bool(rec.ok and rec.stdout.strip())
 
-    patch = _git(repo, f'log -p -n 3 --format="%h %s" -- "{path}"')
+    patch = _git(repo, f'log -p -n 3 --format="%h %s" -- {_q(path)}')
     if patch.ok:
         fh.hunks = _trim_patch(patch.stdout)
     return fh
@@ -81,7 +90,7 @@ def _trim_patch(text: str, context: int = 3) -> str:
 
 
 def blame(repo: Path, path: str, start: int, end: int) -> str:
-    r = _git(repo, f'blame -L {start},{end} --date=short -- "{path}"')
+    r = _git(repo, f'blame -L {start},{end} --date=short -- {_q(path)}')
     return r.stdout[:3000] if r.ok else ""
 
 
@@ -105,7 +114,7 @@ def manifest_changes(repo: Path, days: int = 90) -> list[Commit]:
 def co_changed(repo: Path, path: str, days: int = 730,
                top: int = 5) -> list[tuple[str, int]]:
     """Files that historically change together with `path` (SPEC.md 21.4)."""
-    r = _git(repo, f'log --since={days}.days --format=%H --name-only -- "{path}"')
+    r = _git(repo, f'log --since={days}.days --format=%H --name-only -- {_q(path)}')
     if not r.ok:
         return []
     counts: dict[str, int] = {}

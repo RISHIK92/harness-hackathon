@@ -14,9 +14,11 @@ groups -> the exact `allowed_tools` a call would get. Then it calls the same
 `answer_question()` everything else calls. Nothing is special-cased.
 
 IT IMPERSONATES A USER WITH NO PASSWORD AND NO TOKEN. That is the whole
-point, and it is why this router is mounted only when `app_env !=
-"production"` (app/main.py, same gate as the two other /dev routers). It
-must never be reachable from a deployment holding anyone else's data.
+point, and it is why this router is mounted only under APP_ENV=development
+AND ENABLE_DEV_IMPERSONATION=true (app/main.py; tests/test_dev_ask_gating.py).
+Development alone is not enough: a development box can still be exposed
+(scripts/dev.sh --with-ngrok). It must never be reachable from a deployment
+holding anyone else's data.
 """
 from __future__ import annotations
 
@@ -148,11 +150,16 @@ async def _config_for(session: AsyncSession, workspace: Workspace, meeting_slug:
     is what the console does.
     """
     if meeting_slug:
-        from app.routers.agent import AgentAskRequest, _call_config
+        from sqlmodel import select
 
-        config = await _call_config(session, AgentAskRequest(question="", meeting_slug=meeting_slug))
-        if not config:
+        from app.models import Meeting
+        from app.routers.agent import _meeting_config
+
+        meeting = (await session.execute(
+            select(Meeting).where(Meeting.slug == normalise(meeting_slug)))).scalars().first()
+        if meeting is None:
             raise HTTPException(404, f"no meeting with slug {normalise(meeting_slug)!r}")
+        config = await _meeting_config(session, meeting)
         if config["workspace_id"] != workspace.id:
             raise HTTPException(
                 403, f"meeting {normalise(meeting_slug)!r} belongs to a different workspace"

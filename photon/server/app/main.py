@@ -3,14 +3,15 @@ import asyncio
 import json
 import structlog
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
-from app.config import get_settings
+from app.config import get_settings, validate_security
+from app.core.repo_access import require_repo_access
 from app.database import create_db_and_tables
 from app.models import User, LearningPathCache  # ensure tables are registered before create_all
-from app.routers import repos, jobs, query, graph, annotations, files, workspaces, meetings
+from app.routers import repos, jobs, graph, annotations, files, workspaces, meetings
 from app.routers import auth
 from app.routers import onboarding
 from app.routers import tools
@@ -33,6 +34,10 @@ from app.routers import dev_ask
 
 log = structlog.get_logger()
 settings = get_settings()
+# Before anything is served: a published default secret signs anyone's
+# session and decrypts every stored connector token. Refuses to import (so
+# uvicorn refuses to start) outside APP_ENV=development.
+validate_security(settings)
 
 # ─── WebSocket connection manager ─────────────────────────────────────────────
 
@@ -137,26 +142,36 @@ async def errors_as_json(request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins (perfect for hackathons)
+    # Explicit origins (CORS_ORIGINS, else CLIENT_BASE_URL). "*" together
+    # with credentials let any site script this API from a signed-in
+    # browser the moment cookies are involved.
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, OPTIONS)
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
 
+# The original codebase-intelligence routers address a repo (or its job or
+# pin) by id in the URL and used to serve it to anyone. require_repo_access
+# resolves that repo and 404s unless the caller's workspace owns it.
+# /api/query is gone: it duplicated the agent without citations and, with a
+# blank repo_id, searched every tenant's code.
+_repo_scoped = [Depends(require_repo_access)]
 app.include_router(repos.router,        prefix="/api/repos",       tags=["repos"])
-app.include_router(jobs.router,         prefix="/api/jobs",        tags=["jobs"])
-app.include_router(query.router,        prefix="/api/query",       tags=["query"])
-app.include_router(graph.router,        prefix="/api/graph",       tags=["graph"])
-app.include_router(annotations.router,  prefix="/api/annotations", tags=["annotations"])
-app.include_router(files.router,        prefix="/api/files",       tags=["files"])
+app.include_router(jobs.router,         prefix="/api/jobs",        tags=["jobs"], dependencies=_repo_scoped)
+app.include_router(graph.router,        prefix="/api/graph",       tags=["graph"], dependencies=_repo_scoped)
+app.include_router(annotations.router,  prefix="/api/annotations", tags=["annotations"], dependencies=_repo_scoped)
+app.include_router(files.router,        prefix="/api/files",       tags=["files"], dependencies=_repo_scoped)
 app.include_router(auth.router,         prefix="/api/auth",        tags=["auth"])
 app.include_router(workspaces.router,   prefix="/api/workspaces",  tags=["workspaces"])
 app.include_router(meetings.router,     prefix="/api/meetings",    tags=["meetings"])
-app.include_router(onboarding.router,   prefix="/api/repos",       tags=["onboarding"])
-app.include_router(tools.router,        prefix="/api/tools",       tags=["tools"])  # unauthenticated for the demo, see CLAUDE.md
-app.include_router(agent.router,        prefix="/api/agent",       tags=["agent"])  # unauthenticated for the demo, see CLAUDE.md
+app.include_router(onboarding.router,   prefix="/api/repos",       tags=["onboarding"], dependencies=_repo_scoped)
+app.include_router(tools.router,        prefix="/api/tools",       tags=["tools"])
+# A signed-in member or the call-agent worker (meeting-scoped token); the
+# tenant comes from that principal, never from the request body.
+app.include_router(agent.router,        prefix="/api/agent",       tags=["agent"])
 app.include_router(github_app.router,   prefix="/api/integrations/github", tags=["github"])
 app.include_router(slack_router.router, prefix="/api/integrations/slack",  tags=["slack"])
 app.include_router(jira_router.router,  prefix="/api/integrations/jira",   tags=["jira"])
@@ -172,27 +187,61 @@ app.include_router(extension_router.router, prefix="/api/extension", tags=["exte
 app.include_router(admin_router.router, prefix="/api/admin", tags=["admin"])
 app.include_router(agent_worker_router.router, prefix="/api/agent-worker", tags=["agent-worker"])
 
-# Dev-only GitHub App manifest bootstrap — never linked from product UI,
-# not mounted in production. See app/routers/dev_github_setup.py.
-if settings.app_env != "production":
+# Dev-only GitHub App manifest bootstrap — never linked from product UI.
+# Mounted only under an explicit APP_ENV=development (the default is
+# production, so a deployment that forgets to set it gets none of this).
+if settings.app_env == "development":
     app.include_router(dev_github_setup.router, prefix="/dev", tags=["dev"])
     app.include_router(dev_slack_setup.router, prefix="/dev", tags=["dev"])
-    # Impersonates a user with no token — see the module docstring. Gated
-    # by this same app_env check, which is the only thing keeping it off a
-    # deployment that holds anyone else's data.
-    app.include_router(dev_ask.router, prefix="/dev", tags=["dev"])
+    # Impersonates a user with no token — see the module docstring. Needs a
+    # second, specific opt-in on top of development: it is the one route that
+    # answers as someone else, and a development box can still be exposed
+    # (scripts/dev.sh --with-ngrok publishes :8000).
+    if settings.enable_dev_impersonation:
+        app.include_router(dev_ask.router, prefix="/dev", tags=["dev"])
 
 
 # ─── WebSocket endpoint ───────────────────────────────────────────────────────
 
 @app.websocket("/ws/{repo_id}")
 async def websocket_endpoint(websocket: WebSocket, repo_id: str):
+    # Ingestion progress for one repo. Browsers cannot set headers on a
+    # WebSocket, so the session token rides in ?token=; the repo must belong
+    # to a workspace that user is a member of.
+    if not await _websocket_may_watch(websocket.query_params.get("token"), repo_id):
+        await websocket.close(code=4404)
+        return
     await manager.connect(repo_id, websocket)
     try:
         while True:
             await websocket.receive_text()  # keep-alive pings
     except WebSocketDisconnect:
         manager.disconnect(repo_id, websocket)
+
+
+async def _websocket_may_watch(token: str | None, repo_id: str) -> bool:
+    from jose import JWTError, jwt
+
+    from app.core.workspace import membership_for
+    from app.database import AsyncSessionLocal
+    from app.models import Repo
+
+    if not token:
+        return False
+    try:
+        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+    except JWTError:
+        return False
+    user_id = payload.get("sub")
+    if not user_id or payload.get("scope"):
+        return False
+    async with AsyncSessionLocal() as session:
+        repo = await session.get(Repo, repo_id)
+        if repo is None:
+            return False
+        if repo.workspace_id:
+            return await membership_for(session, repo.workspace_id, user_id) is not None
+        return repo.owner_id == user_id
 
 
 @app.get("/health")

@@ -6,6 +6,7 @@ on a repository that does not follow them.
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,12 @@ class Scope:
 
 
 TEST_DIR = re.compile(r"(^|/)(tests?|spec|__tests__)(/|$)")
+IDENT = re.compile(r"[A-Za-z_][\w.]*")
+
+
+def _join(paths: list) -> str:
+    """Test files as shell arguments: a file name is not a command."""
+    return " ".join(shlex.quote(p) for p in paths)
 
 
 def _stem(path: str) -> str:
@@ -44,7 +51,7 @@ def select(repo: Path, changed: list, symbols: list, toolchain,
              if _stem(t).replace("test_", "").replace("_test", "")
              .replace(".test", "") in stems]
     if named:
-        return Scope(selector=" ".join(named), tests=named,
+        return Scope(selector=_join(named), tests=named,
                      method="same-name test file")
 
     # 2. tests importing the changed module (or its package)
@@ -58,16 +65,21 @@ def select(repo: Path, changed: list, symbols: list, toolchain,
         importers += [h.path for h in hits if _is_test(h.path)]
     importers = sorted(set(importers))
     if importers:
-        return Scope(selector=" ".join(importers), tests=importers,
+        return Scope(selector=_join(importers), tests=importers,
                      method="test imports the changed module")
 
     # 3. -k / -run / -t on the changed symbol names
-    names = [s for s in symbols if s and len(s) > 3]
+    #
+    # The symbols are the model's (P2's plan names them), and this selector
+    # is appended to a shell command. Only identifiers are used, and the
+    # expression is shell-quoted: `-k "$(...)"` was a command.
+    names = [s for s in symbols if s and len(s) > 3 and IDENT.fullmatch(s)]
     if names and toolchain.language == "python":
         expr = " or ".join(names[:4])
-        return Scope(selector=f'-k "{expr}"', method="pytest -k on symbols")
+        return Scope(selector=f"-k {shlex.quote(expr)}",
+                     method="pytest -k on symbols")
     if names and toolchain.language == "go":
-        return Scope(selector=f"-run '{'|'.join(names[:4])}'",
+        return Scope(selector=f"-run {shlex.quote('|'.join(names[:4]))}",
                      method="go test -run on symbols")
 
     # 4. the nearest test directory
@@ -77,7 +89,7 @@ def select(repo: Path, changed: list, symbols: list, toolchain,
             cand = "/".join(parts[:i] + ("tests",))
             if any(t.startswith(cand) for t in tests):
                 sel = [t for t in tests if t.startswith(cand)]
-                return Scope(selector=" ".join(sel), tests=sel,
+                return Scope(selector=_join(sel), tests=sel,
                              method="nearest test directory")
 
     # 5. nothing found

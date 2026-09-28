@@ -63,8 +63,29 @@ def test_whisper_routes_in_its_workspace_are_allowed_and_touch_last_seen():
     assert device.last_seen_at is not None
 
 
-@pytest.mark.parametrize("path", ["/api/repos", "/api/agent-jobs", "/api/workspaces/settings",
-                                  "/api/escalations/mine", "/api/meetings"])
+@pytest.mark.parametrize("path", [
+    "/api/extension/meet-session",
+    "/api/extension/me",
+    "/api/whisper/sessions/s1/thread",
+    "/api/whisper/sessions/s1/lines",
+    "/api/whisper/threads/t1/messages",
+    "/api/whisper/threads/t1/ask",
+])
+def test_exactly_the_routes_the_extension_calls_are_allowed(path):
+    _check(path, "ws1", ExtensionDevice(id="dev1", user_id="u1", workspace_id="ws1"))
+
+
+@pytest.mark.parametrize("path", [
+    "/api/repos", "/api/agent-jobs", "/api/workspaces/settings", "/api/escalations/mine", "/api/meetings",
+    # A path PREFIX used to be the rule, which let a leaked token mint new
+    # pairing codes (devices that outlive revoking the leaked one) ...
+    "/api/extension/pair-codes", "/api/extension/devices", "/api/extension/devices/dev2",
+    # ... dispatch paid meeting bots, read another session's webhook secret,
+    # or end someone else's session.
+    "/api/whisper/join", "/api/whisper/sessions", "/api/whisper/sessions/s1/webhook",
+    "/api/whisper/sessions/s1/bot", "/api/whisper/sessions/s1/end",
+    "/api/whisper/sessions/s1/lines/extra",
+])
 def test_everything_else_is_refused(path):
     device = ExtensionDevice(id="dev1", user_id="u1", workspace_id="ws1")
     with pytest.raises(HTTPException) as err:
@@ -76,14 +97,14 @@ def test_another_workspace_or_none_is_refused():
     device = ExtensionDevice(id="dev1", user_id="u1", workspace_id="ws1")
     for ws in ("ws2", None):
         with pytest.raises(HTTPException):
-            _check("/api/whisper/sessions", ws, device)
+            _check("/api/whisper/sessions/s1/lines", ws, device)
 
 
 def test_a_revoked_or_unknown_browser_is_refused():
     revoked = ExtensionDevice(id="dev1", user_id="u1", workspace_id="ws1", revoked_at=datetime.utcnow())
     for device in (revoked, None):
         with pytest.raises(HTTPException) as err:
-            _check("/api/whisper/sessions", "ws1", device)
+            _check("/api/whisper/sessions/s1/lines", "ws1", device)
         assert err.value.status_code == 401
 
 

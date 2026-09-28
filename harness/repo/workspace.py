@@ -5,12 +5,34 @@ worse tree than its best attempt.
 """
 from __future__ import annotations
 
+import shlex
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..verify.runner import run
+
+
+def scaffolding(f: str) -> bool:
+    """True for a path the run left behind that is not part of the change:
+    the harness's own directories, its reproduction test, and the build
+    output a test run writes. The service's publish patch uses the same
+    rule, so what C4 judged is what gets committed."""
+    from .search import SKIP_DIRS, SKIP_SUFFIX
+    path = Path(f)
+    if f.startswith((".harness", ".worktrees")):
+        return True
+    # The self-written reproduction (verify/repro.py) lives at the
+    # repository root so its imports are the ordinary ones. It is
+    # scaffolding, not a deliverable: counting it here would fail C4
+    # and put a model-written test in the diff.
+    if path.stem.startswith("harness_repro") or \
+            path.name.startswith("test_harness_repro"):
+        return True
+    if any(part in SKIP_DIRS for part in path.parts):
+        return True
+    return path.suffix.lower() in SKIP_SUFFIX or f.endswith(".coverage")
 
 
 @dataclass
@@ -30,6 +52,7 @@ class Workspace:
 
     # -- git ---------------------------------------------------------------
     def _detect_git(self) -> bool:
+        # Constant query; no model text.
         r = run("git rev-parse --is-inside-work-tree", self.path, timeout=10,
                 check_deny=False)
         return r.ok and r.stdout.strip() == "true"
@@ -84,7 +107,6 @@ class Workspace:
         spurious block, so they are filtered here rather than everywhere
         downstream.
         """
-        from .search import SKIP_DIRS, SKIP_SUFFIX
         if not self.is_git:
             return []
         # Never truncated: this list is what C4 checks for unintended
@@ -96,24 +118,7 @@ class Workspace:
         files += [ln.strip() for ln in untracked.stdout.splitlines()
                   if ln.strip()]
 
-        out = []
-        for f in set(files):
-            path = Path(f)
-            if f.startswith((".harness", ".worktrees")):
-                continue
-            # The self-written reproduction (verify/repro.py) lives at the
-            # repository root so its imports are the ordinary ones. It is
-            # scaffolding, not a deliverable: counting it here would fail C4
-            # and put a model-written test in the diff.
-            if path.stem.startswith("harness_repro") or \
-                    path.name.startswith("test_harness_repro"):
-                continue
-            if any(part in SKIP_DIRS for part in path.parts):
-                continue
-            if path.suffix.lower() in SKIP_SUFFIX or f.endswith(".coverage"):
-                continue
-            out.append(f)
-        return sorted(out)
+        return sorted(f for f in set(files) if not scaffolding(f))
 
     def diff(self, stat: bool = False) -> str:
         if not self.is_git:
@@ -183,4 +188,26 @@ class Workspace:
             return
         self.git("reset -q")
         self.git("checkout -- .")
-        self.git("clean -qfd -e .harness -e .worktrees", timeout=30)
+        # The reproduction test is ours, untracked, and needed again after
+        # this: `clean` deleted it between cycles, so every cycle after the
+        # first "confirmed" a test file that no longer existed, and read
+        # the missing file as the fix failing. It is removed once, at the
+        # end of the run (orchestrator), never here.
+        from ..verify.repro import NAMES
+        keep = " ".join(f"-e {shlex.quote(n)}"
+                        for n in sorted(set(NAMES.values())))
+        self.git(f"clean -qfd -e .harness -e .worktrees {keep}", timeout=30)
+
+    def uncommitted(self) -> list[str]:
+        """What `revert_all` would destroy: modified, staged and untracked
+        (not ignored) paths, less the harness's own. Empty outside git."""
+        if not self.is_git:
+            return []
+        self.exclude_harness_dir()
+        out = []
+        for line in self.git("status --porcelain -- .", truncate=False
+                             ).stdout.splitlines():
+            path = line[3:].strip().strip('"')
+            if path and not path.startswith((".harness", ".worktrees")):
+                out.append(path)
+        return out

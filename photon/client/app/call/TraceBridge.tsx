@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { RoomEvent } from "livekit-client";
+import { RoomEvent, type RemoteParticipant } from "livekit-client";
 import { useRoomContext } from "@livekit/components-react";
 import type { TraceEvent } from "@/lib/trace";
 
@@ -17,8 +17,12 @@ export default function TraceBridge({ onEvent }: { onEvent: (e: TraceEvent) => v
 
   useEffect(() => {
     const decoder = new TextDecoder();
-    const handler = (payload: Uint8Array, _p: unknown, _k: unknown, topic?: string) => {
+    const handler = (payload: Uint8Array, participant?: RemoteParticipant, _k?: unknown, topic?: string) => {
       if (topic !== TRACE_TOPIC) return; // never confuse chat/other data traffic for a trace
+      // Only the agent speaks on this topic. Every participant can publish
+      // data, so without this a guest could inject fake answers and fake
+      // evidence into members' panels.
+      if (!participant?.isAgent) return;
       try {
         onEvent(JSON.parse(decoder.decode(payload)) as TraceEvent);
       } catch {

@@ -24,14 +24,27 @@ settings = get_settings()
 _GITHUB_OAUTH_STATE_COOKIE = "gh_oauth_state"
 
 
+def _callback_error(message: str) -> RedirectResponse:
+    """Back to the client's callback page with a message in the fragment —
+    never the query string, same as the token."""
+    from urllib.parse import quote
+
+    resp = RedirectResponse(f"{settings.client_base_url}/auth/callback#error={quote(message)}")
+    resp.delete_cookie(_GITHUB_OAUTH_STATE_COOKIE)
+    return resp
+
+
 @router.post("/signup", response_model=UserRead, status_code=201)
 async def signup(payload: UserCreate, session: AsyncSession = Depends(get_session)):
-    # Check duplicate email
-    result = await session.execute(select(User).where(User.email == payload.email))
+    # Normalised BEFORE the duplicate check: the check used to compare the
+    # raw email while the row stored the lowercased one, so "A@x.com" after
+    # "a@x.com" passed the check and died on the unique constraint (a 500).
+    email = payload.email.lower().strip()
+    result = await session.execute(select(User).where(User.email == email))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    user = User(email=payload.email.lower().strip(), hashed_password=hash_password(payload.password))
+    user = User(email=email, hashed_password=hash_password(payload.password))
     session.add(user)
     await session.commit()
     await session.refresh(user)
@@ -135,6 +148,9 @@ async def github_callback(
         user_resp.raise_for_status()
         gh_user = user_resp.json()
 
+        # GitHub only lets a VERIFIED address be the public one, and
+        # /user/emails below is filtered to verified ones — so any email
+        # found here was proven to GitHub. The noreply fallback is not.
         email = gh_user.get("email")
         if not email:
             # Private-email users don't expose it on /user. /user/emails
@@ -176,18 +192,27 @@ async def github_callback(
     user = result.scalar_one_or_none()
 
     if not user:
-        # Not linked yet — match by email so a user who already signed up
-        # with email/password gets linked instead of getting a duplicate
-        # account when they later click "Continue with GitHub".
+        # Not linked yet. Linking by email used to be unconditional, and
+        # signup never verifies an email — so anyone could register the
+        # victim's address (or their predictable noreply address) with a
+        # password first, wait for the victim to "Continue with GitHub",
+        # and keep a password into the victim's account. An existing account
+        # that has a password is therefore never taken over by a GitHub
+        # sign-in: its owner signs in with the password.
         result = await session.execute(select(User).where(User.email == email))
-        user = result.scalar_one_or_none()
-        if user:
-            user.github_id = github_id
-            user.github_login = gh_user.get("login")
-            session.add(user)
+        existing = result.scalar_one_or_none()
+        if existing and (existing.hashed_password or existing.github_id):
+            log.info("auth.github_link_refused", reason="existing account with this email")
+            return _callback_error(
+                "An account with this email already exists. Sign in with your email and password."
+            )
+        if existing:
+            existing.github_id = github_id
+            existing.github_login = gh_user.get("login")
+            user = existing
         else:
             user = User(email=email, hashed_password=None, github_id=github_id, github_login=gh_user.get("login"))
-            session.add(user)
+        session.add(user)
         await session.commit()
         await session.refresh(user)
 

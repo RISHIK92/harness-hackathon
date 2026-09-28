@@ -8,9 +8,10 @@ nobody came, and nothing said why. The usual reason is simply that no worker
 process is running (or it is pointed at a different API), and that is the one
 thing the browser cannot find out on its own — LiveKit does not list workers.
 
-The heartbeat is unauthenticated, like the worker's transcript writes: a
-worker is a server-side process with no user session. The worst a forged
-heartbeat can do is make a status light green for 30 seconds.
+The heartbeat needs the worker's token (app/core/service_auth.py, scope
+"worker:heartbeat"), like its other calls. The status read stays public —
+the join page asks it before anyone signs in — but no longer names the
+worker's host.
 """
 from __future__ import annotations
 
@@ -18,10 +19,13 @@ import json
 import time
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter
+from typing import Optional
+
+from fastapi import APIRouter, Depends
 from sqlmodel import SQLModel
 
 from app.config import get_settings
+from app.core import service_auth
 
 router = APIRouter()
 
@@ -41,7 +45,9 @@ def _redis() -> aioredis.Redis:
 
 
 @router.post("/heartbeat")
-async def heartbeat(body: Heartbeat):
+async def heartbeat(body: Heartbeat,
+                    worker_token: Optional[str] = Depends(service_auth.worker_token_header)):
+    service_auth.require_worker(worker_token, service_auth.HEARTBEAT_SCOPE)
     r = _redis()
     try:
         await r.set(_KEY.format(name=body.agent_name or "photon"),
@@ -62,5 +68,5 @@ async def status(agent_name: str = "photon"):
         return {"online": False, "agent_name": agent_name,
                 "detail": "No voice worker is running — start it with scripts/dev.sh"}
     data = json.loads(raw)
-    return {"online": True, "agent_name": agent_name, "host": data.get("host"),
+    return {"online": True, "agent_name": agent_name,
             "seconds_ago": round(time.time() - data.get("at", 0), 1)}

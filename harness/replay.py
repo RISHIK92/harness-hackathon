@@ -74,6 +74,9 @@ def replay(trajectory: Path, repo: Path, log: Logger) -> tuple[list, bool]:
             cmd = payload.get("cmd", "")
             if not cmd:
                 continue
+            # A test command the harness itself recorded, re-run from the
+            # operator's own trajectory file; model text in it was quoted
+            # when it was built. Deny list off, as it was the first time.
             result = run(cmd, repo, timeout=300, check_deny=False)
             expected = payload.get("counts") or {}
             steps.append(Step(ev.i, "test", _label(cmd),

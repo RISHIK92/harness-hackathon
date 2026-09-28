@@ -8,6 +8,7 @@ interprets, and the harness decides what is true.
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
 from ..context.assemble import system_prompt, wrap_untrusted
@@ -16,6 +17,7 @@ from ..records import (AffectedFile, Check, Evidence, Hypothesis,
                        RecordError, RootCauseRecord)
 from ..repo import history as H
 from ..localize.sbfl import is_test_path
+from ..repo.paths import in_repo, norm
 from ..repo.search import is_source
 from ..repo.snippets import read_window, symbols
 from ..structured import ParseFailure, ask_structured, extract_json
@@ -42,8 +44,8 @@ Propose exactly {n} competing explanations for this bug.
 Each explanation MUST carry a check the harness can execute mechanically.
 Allowed check kinds:
   grep    arg = a regular expression to search the repository for
-  read    arg = "path:line" to read a window of source
-  git     arg = a path whose recent history should be inspected
+  read    arg = "path:line" to read a window of source inside the repository
+  git     arg = a repository path whose recent history should be inspected
   env     arg = an environment variable name to test for presence
   version arg = a package name whose declared vs pinned version to compare
 
@@ -328,14 +330,22 @@ class Investigation:
                 return "no match in the repository", "refuted"
 
             if k == "read":
+                # Confined to the repository. `c.repo / "/etc/passwd"` IS
+                # /etc/passwd, and `../..` walks out just as easily; whatever
+                # this returns goes into the next prompt, so a read outside
+                # the tree was a way to hand the model any file on the host.
                 path, _, line = arg.partition(":")
-                window = read_window(c.repo / path.strip(),
-                                     int(line or 1), 6, 12)
+                target = in_repo(c.repo, path)
+                if target is None:
+                    return "outside the repository; not read", "inconclusive"
+                window = read_window(target, int(line or 1), 6, 12)
                 return (window[:800], "inconclusive" if not window
                         else "confirmed")
 
             if k == "git":
-                fh = H.file_history(c.repo, arg.strip())
+                if in_repo(c.repo, arg) is None:
+                    return "outside the repository; not read", "inconclusive"
+                fh = H.file_history(c.repo, norm(arg))
                 if fh.commits:
                     return fh.render(3), "confirmed" if fh.recent else "inconclusive"
                 return "no history for that path", "refuted"
@@ -355,12 +365,44 @@ class Investigation:
                 return f"no version skew found for {arg}", "refuted"
 
             if k == "test":
-                r = run(arg, c.repo, timeout=120, check_deny=False)
-                return (r.output[-800:],
-                        "confirmed" if r.exit_code != 0 else "refuted")
+                return self._run_test(arg)
         except Exception as exc:
             return f"check could not run: {exc}", "inconclusive"
         return "unsupported check kind", "inconclusive"
+
+    def _run_test(self, arg: str) -> tuple[str, str]:
+        """A test the model names, run the way the repository runs its tests.
+
+        This used to run `arg` itself, through a shell, on the host, with the
+        deny list switched off: in a phase that is structurally unable to
+        write code, `curl ... | sh` was a valid "check". The model now names
+        a TEST -- a file or node id inside the repository -- and the command
+        around it is the toolchain the harness discovered, so nothing the
+        model writes is ever read by the shell as a command.
+        """
+        c = self.ctx
+        cmd = getattr(c.toolchain, "test_cmd", None)
+        if not cmd:
+            return "no test command in this repository", "inconclusive"
+        selector = check_selector(c.repo, arg)
+        if not selector:
+            return ("not a test file or test id inside the repository",
+                    "inconclusive")
+        # The deny list stays ON: the selector came from the model, and the
+        # command around it is the repository's. A refusal raises into
+        # `_execute`, which reports the check as inconclusive. `run` routes
+        # into the container when one is active, like every other test run.
+        r = run(f"{cmd} {shlex.quote(selector)}", c.repo, timeout=120)
+        # A selector that collected nothing, or a runner that could not
+        # start, exits non-zero too. That is not the test failing, and
+        # reading it as "confirmed" would turn a typo into evidence.
+        from ..verify.repro import _looks_empty
+        if r.timed_out or r.exit_code in (124, 126, 127) or _looks_empty(r) \
+                or (c.toolchain.language == "python"
+                    and r.exit_code in (4, 5)):
+            return (r.output[-800:] or "the test did not run", "inconclusive")
+        return (r.output[-800:],
+                "confirmed" if r.exit_code != 0 else "refuted")
 
     def _synthesize(self, issue, sbfl, route, external, hypotheses=None,
                     oracle=None) -> RootCauseRecord:
@@ -423,7 +465,7 @@ class Investigation:
             if isinstance(f, dict) and f.get("path"):
                 lines = f.get("lines") or [0, 0]
                 rec.files.append(AffectedFile(
-                    str(f["path"]).lstrip("./"),
+                    norm(f["path"]),
                     (int(lines[0]), int(lines[1])) if len(lines) == 2 else (0, 0),
                     str(f.get("why", ""))[:200]))
 
@@ -455,6 +497,32 @@ class Investigation:
                              f"{sbfl.lines[0].path}:{sbfl.lines[0].line}")
             rec.confidence = "low"
         return rec
+
+
+# A test file or a pytest-style node id: `tests/test_x.py::TestY::test_z[a-1]`.
+# No whitespace, quote, `$`, `;`, `|`, `&`, redirection or backtick can match,
+# and the leading character is checked separately so an option (`-p plugin`
+# loads code) cannot pose as a test.
+SELECTOR = re.compile(r"[\w./@+,=\[\]-]+(?:::[\w./@+,=\[\]-]+)*")
+
+
+def check_selector(repo: Path, arg: str) -> str:
+    """`arg` as a test selector the harness may pass on, or "" to refuse.
+
+    The file part must exist inside the repository. Anything else -- a
+    command, a flag, a path outside the tree -- is not a test.
+    """
+    sel = (arg or "").strip()
+    if not SELECTOR.fullmatch(sel):
+        return ""
+    path, sep, rest = sel.partition("::")
+    rel = norm(path)
+    if not rel or rel.startswith("-"):
+        return ""
+    target = in_repo(repo, rel)
+    if target is None or not target.exists():
+        return ""
+    return rel + (sep + rest if sep else "")
 
 
 def _extra_rounds() -> int:

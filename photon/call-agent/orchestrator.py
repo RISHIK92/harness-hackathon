@@ -24,6 +24,8 @@ import time
 from dataclasses import dataclass, field
 
 import httpx
+
+import service_auth
 import structlog
 
 from adapters.base import TransportAdapter
@@ -178,7 +180,13 @@ class Orchestrator:
         self.agent_name = (agent_name or "").strip() or DEFAULT_AGENT_NAME
         self._wake_word = wake_word_re(self.agent_name)
         self.state = TurnState()
-        self._http = httpx.AsyncClient(timeout=90.0)
+        # Every call to the brain-api carries this meeting's worker token
+        # (service_auth.py): the transcript, escalation and ask routes refuse
+        # anything else, and a token for this room opens no other room.
+        self._http = httpx.AsyncClient(
+            timeout=90.0,
+            headers=service_auth.headers_for(service_auth.meeting_scope(meeting_slug or "")),
+        )
         # Whisper mode: every line goes to the transcript (which feeds the
         # meeting's whisper session server-side) and NOTHING is answered
         # aloud — suggestions land privately in each member's thread.
@@ -420,7 +428,14 @@ class Orchestrator:
                 await asyncio.sleep(remaining)
 
         if result is None:
+            # The stream ended without an answer — the brain-api reported a
+            # turn.error, or the connection dropped mid-turn. The caller heard
+            # "one moment" and must not be left in silence after it.
             log.warning("orchestrator.no_turn_done_event", question=question)
+            await self.adapter.speak(
+                "Sorry, I couldn't finish that one — could you ask again in a moment?",
+                language=language,
+            )
             return
 
         answer = (result.get("answer") or "").strip()

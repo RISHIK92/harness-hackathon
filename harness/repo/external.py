@@ -185,6 +185,7 @@ def _probe_manifest_churn(repo: Path, ef: ExternalFactors, toolchain,
     ef.checked.append("recent dependency-manifest changes (90 days)")
     changes = manifest_changes(repo)
     # A manifest touched by the repository's first commit is not churn.
+    # Constant query; no model text.
     root = run("git rev-list --max-parents=0 HEAD", repo, timeout=15,
                check_deny=False)
     roots = {ln.strip()[:7] for ln in root.stdout.splitlines() if ln.strip()}

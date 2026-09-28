@@ -1,10 +1,11 @@
 from __future__ import annotations
 import os
+import re
 import zipfile
 import io
 import asyncio
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header, Query
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import SQLModel, select
 
@@ -14,6 +15,7 @@ from app.config import get_settings
 from app.tasks.ingestion import run_ingestion
 from app.core.auth import get_current_user
 from app.core.workspace import get_current_workspace, require_role
+from app.core.repo_access import may_access
 from app.services.estimate import estimate as compute_estimate, files_from_size_kb
 
 router = APIRouter()
@@ -64,16 +66,21 @@ async def estimate_ingest_time(
     }
 
 
-def _may_access(repo: Repo, user: User, workspace: Workspace) -> bool:
-    """Workspace membership is the rule; owner_id is a legacy fallback.
+# Moved to app/core/repo_access.py so the legacy repo-scoped routers share it.
+_may_access = may_access
 
-    Repos created before workspaces existed have workspace_id = NULL, and
-    silently 404ing someone's own repo after an upgrade would look like
-    data loss. Once those are backfilled this fallback can go.
-    """
-    if repo.workspace_id:
-        return repo.workspace_id == workspace.id
-    return repo.owner_id == user.id
+_GITHUB_URL = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?(\.git)?/?$")
+
+
+def _validate_source(payload: RepoCreate) -> None:
+    if payload.source_type == RepoSourceType.GITHUB:
+        if not payload.source_url or not _GITHUB_URL.match(payload.source_url.strip()):
+            raise HTTPException(status_code=422, detail="Enter a GitHub repository URL like https://github.com/owner/repo")
+        payload.source_url = payload.source_url.strip()
+        return
+    if payload.source_type == RepoSourceType.LOCAL and settings.app_env == "development":
+        return
+    raise HTTPException(status_code=422, detail="Repositories are connected from GitHub (or uploaded as a zip)")
 
 
 @router.post("", response_model=RepoRead, status_code=201)
@@ -83,7 +90,13 @@ async def create_repo(
     current_user: User = Depends(get_current_user),
     workspace: Workspace = Depends(require_role(WorkspaceRole.MEMBER)),
 ):
-    """Connect a repository (GitHub URL or local path)."""
+    """Connect a repository (a public GitHub URL; a local path in development).
+
+    The source is validated: it used to be any string. A local path was
+    symlinked from anywhere on the server into storage and served back
+    through the file routes, and a clone URL on any host received the
+    deployment's GitHub token."""
+    _validate_source(payload)
     repo = Repo(**payload.model_dump(), owner_id=current_user.id, workspace_id=workspace.id)
     session.add(repo)
     await session.commit()
@@ -171,6 +184,29 @@ async def get_repo(
     if not _may_access(repo, current_user, workspace):
         raise HTTPException(status_code=404, detail="Repo not found")
     return repo
+
+
+@router.get("/{repo_id}/file")
+async def read_repo_file(
+    repo_id: str,
+    path: str = Query(..., min_length=1, max_length=1024),
+    start: Optional[int] = Query(default=None, ge=1),
+    end: Optional[int] = Query(default=None, ge=1),
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+    workspace: Workspace = Depends(get_current_workspace),
+):
+    """Lines `start..end` of one file, for the call's code panel.
+
+    Replaces the panel's use of the raw, unauthenticated tool endpoint: the
+    same read, behind the same workspace check as every other repo route.
+    Returns the read_file tool envelope, which is what the panel parses."""
+    repo = await session.get(Repo, repo_id)
+    if not repo or not _may_access(repo, current_user, workspace):
+        raise HTTPException(status_code=404, detail="Repo not found")
+    from app.tools.code import read_file
+
+    return await read_file(path, repo_id=repo.id, start=start, end=end)
 
 
 @router.delete("/{repo_id}", status_code=204)

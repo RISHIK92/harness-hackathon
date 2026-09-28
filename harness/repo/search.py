@@ -87,6 +87,9 @@ class Search:
         for g in globs or []:
             parts += ["--glob", g]
         parts += ["--", _shq(pattern), "."]
+        # The pattern can be the model's (a P1 grep check), so it is one
+        # single-quoted argument after `--`. The deny list reads command
+        # text and would refuse a search for the word "sudo".
         r = run(" ".join(parts), self.repo, timeout=30, check_deny=False)
         if r.exit_code not in (0, 1):
             return None
@@ -105,6 +108,7 @@ class Search:
 
     def _pcre_ok(self) -> bool:
         if self._pcre is None:
+            # Constant probe; no model text.
             r = run("git grep -P -n -I -- 'a' -- /dev/null", self.repo,
                     timeout=10, check_deny=False)
             self._pcre = "not built with PCRE" not in (r.stderr or "")
@@ -120,6 +124,7 @@ class Search:
         else:
             flag = "-E"
         cmd = f"git grep -n -I {flag} -- {_shq(pattern)}"
+        # As in `_rg`: the only variable part is a single-quoted pattern.
         r = run(cmd, self.repo, timeout=30, check_deny=False)
         if r.exit_code not in (0, 1):
             return None
@@ -174,6 +179,7 @@ class Search:
     def files(self) -> list[str]:
         """Tracked files, or a filtered walk when git is unavailable."""
         # Never truncated: this is the index the whole run navigates by.
+        # Constant query; no model text.
         r = run("git ls-files", self.repo, timeout=30, check_deny=False,
                 truncate=False)
         if r.ok and r.stdout.strip():

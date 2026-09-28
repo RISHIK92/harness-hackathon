@@ -131,6 +131,9 @@ def _try_venv(repo: Path, gap: str, ctx) -> Decision | None:
         return None
 
     ctx.log.working("creating a virtualenv for the project")
+    # Every command in this rung is harness-built from constants and the
+    # repository's manifests, after the consent gate; no model text. The
+    # deny list would refuse the `pip install` that is the point of it.
     made = run(f"{base} -m venv .venv", repo, timeout=180, check_deny=False)
     if made.exit_code != 0:
         ctx.log.done_working()
@@ -201,6 +204,7 @@ def _try_install_docker(repo: Path, gap: str, ctx) -> Decision | None:
 
     from .verify.runner import run
     ctx.log.working(f"installing Docker via {via}")
+    # A fixed installer command the operator approved on the card above.
     result = run(cmd, repo, timeout=INSTALL_TIMEOUT, check_deny=False)
     ctx.log.done_working()
     if result.exit_code != 0:

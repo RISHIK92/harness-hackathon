@@ -88,7 +88,10 @@ export async function GET(req: NextRequest) {
 
     identity = `user:${user.id}`;
     name = user.email;
-    metadata = { user_id: user.id, email: user.email, guest: false };
+    // `member` decides who receives the agent's trace events, which carry
+    // internal evidence (call-agent/adapters/livekit_adapter.py). Signed
+    // into this token, so it cannot be claimed from the browser.
+    metadata = { user_id: user.id, email: user.email, guest: false, member: isMember };
   } else {
     if (!guestName) {
       return NextResponse.json({ error: "A name is required to join as a guest" }, { status: 400 });
@@ -103,17 +106,20 @@ export async function GET(req: NextRequest) {
       `${BRAIN_API}/api/meetings/${encodeURIComponent(room)}/admission/${encodeURIComponent(knockId)}`
     );
     const verdict = admission.ok ? await admission.json() : { admitted: false };
-    if (!verdict.admitted) {
+    if (!verdict.admitted || !verdict.identity_key) {
       return NextResponse.json(
         { error: "You haven't been admitted to this call yet" },
         { status: 403 }
       );
     }
-    // Random suffix so two guests typing the same name don't collide into
-    // one LiveKit identity (which would silently disconnect the first).
-    identity = `guest:${crypto.randomUUID().slice(0, 8)}`;
-    name = guestName;
-    metadata = { guest: true, display_name: guestName };
+    // Bound to the admission, not to what this request says: the name the
+    // admitting member saw, and one identity per admitted knock. A random
+    // identity and the ?name= parameter used to let one admitted knock mint
+    // any number of guests under any names; now a second join with the same
+    // knock is the same participant (LiveKit replaces the older session).
+    identity = `guest:${verdict.identity_key}`;
+    name = (verdict.display_name || guestName).slice(0, 40);
+    metadata = { guest: true, member: false, display_name: name };
   }
 
   const at = new AccessToken(apiKey, apiSecret, {

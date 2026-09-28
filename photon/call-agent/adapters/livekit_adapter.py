@@ -419,13 +419,37 @@ class LiveKitAdapter:
     async def announce(self, text: str, language: str | None = None) -> None:
         await self.speak(text, language)
 
+    def _member_identities(self) -> list[str]:
+        """Participants whose join token says they are members of the
+        meeting's workspace. The metadata is signed into the token by our own
+        token route (client/app/api/livekit-token), so a guest cannot claim it."""
+        members = []
+        for participant in self._ctx.room.remote_participants.values():
+            try:
+                meta = json.loads(participant.metadata or "{}")
+            except (TypeError, ValueError):
+                continue
+            if meta.get("member") is True:
+                members.append(participant.identity)
+        return members
+
     async def publish_event(self, event: dict) -> None:
-        """Broadcast one trace event to every participant over LiveKit's
+        """Send one trace event to the call's workspace MEMBERS over LiveKit's
         data channel. Reliable, since a dropped tool.done would leave the
-        panel showing a tool as still running forever."""
+        panel showing a tool as still running forever.
+
+        Members only: a turn.done carries every evidence snippet the answer
+        drew on — internal Slack, code, other calls — and this used to go to
+        every participant, so an external guest received raw internal
+        evidence the spoken answer had deliberately left out. With no member
+        in the room nothing is sent: an empty destination list means
+        "everyone" to LiveKit, which is exactly the leak."""
+        members = self._member_identities()
+        if not members:
+            return
         try:
             await self._ctx.room.local_participant.publish_data(
-                json.dumps(event), reliable=True, topic=TRACE_TOPIC
+                json.dumps(event), reliable=True, topic=TRACE_TOPIC, destination_identities=members
             )
         except Exception as exc:  # noqa: BLE001 - a UI event must never take the call down
             log.warning("livekit_adapter.publish_event_failed", type=event.get("type"), error=str(exc))

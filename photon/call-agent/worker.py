@@ -16,6 +16,7 @@ import structlog
 from dotenv import load_dotenv
 from livekit import agents, rtc
 
+import service_auth
 from adapters.livekit_adapter import LiveKitAdapter, build_stt
 from adapters.room_listener import RoomListener
 from orchestrator import Orchestrator
@@ -26,24 +27,38 @@ log = structlog.get_logger()
 BRAIN_API_URL = os.environ.get("BRAIN_API_URL", "http://localhost:8000")
 
 
+CALL_CONFIG_ATTEMPTS = 3
+
+
 async def _call_config(room_name: str) -> dict:
     """Fetch the meeting's configuration before building the session.
 
     The voice stack has to be decided BEFORE AgentSession is constructed —
     STT and TTS are constructor arguments — so this is a blocking fetch at
-    job start rather than something applied later. A failure here is not
-    fatal: the deployment default is a working stack, and a call that
-    connects in English beats a call that does not connect.
+    job start rather than something applied later.
+
+    A few retries, then a FAIL-SAFE default: listen-only. It used to fall
+    back to `{}`, which meant speak mode — so a brain-api blip at join time
+    turned a meeting set up as whisper (the agent must never speak) into one
+    where it announced itself and answered aloud. Not speaking when unsure
+    is the recoverable mistake; speaking into a whisper call is not.
     """
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(f"{BRAIN_API_URL}/api/meetings/{room_name}/call-config")
-            if resp.status_code == 200:
-                return resp.json()
-            log.info("worker.call_config_unavailable", status=resp.status_code, room=room_name)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("worker.call_config_failed", error=str(exc), room=room_name)
-    return {}
+    headers = service_auth.headers_for(service_auth.meeting_scope(room_name))
+    for attempt in range(CALL_CONFIG_ATTEMPTS):
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(f"{BRAIN_API_URL}/api/meetings/{room_name}/call-config",
+                                        headers=headers)
+                if resp.status_code == 200:
+                    return resp.json()
+                log.info("worker.call_config_unavailable", status=resp.status_code, room=room_name)
+                if resp.status_code in (401, 404, 503):
+                    break               # not transient: wrong credentials, or no such meeting
+        except Exception as exc:  # noqa: BLE001
+            log.warning("worker.call_config_failed", error=str(exc), room=room_name, attempt=attempt + 1)
+        await asyncio.sleep(1.5 * (attempt + 1))
+    log.error("worker.call_config_unresolved_listen_only", room=room_name)
+    return {"mode": "whisper"}
 
 
 async def entrypoint(ctx: agents.JobContext) -> None:
@@ -148,7 +163,8 @@ def _heartbeat_forever() -> None:
             "host": socket.gethostname(), "brain_api_url": BRAIN_API_URL}
     while True:
         try:
-            httpx.post(f"{BRAIN_API_URL}/api/agent-worker/heartbeat", json=body, timeout=5.0)
+            httpx.post(f"{BRAIN_API_URL}/api/agent-worker/heartbeat", json=body, timeout=5.0,
+                       headers=service_auth.headers_for(service_auth.HEARTBEAT_SCOPE))
         except Exception as exc:  # noqa: BLE001
             log.warning("worker.heartbeat_failed", error=str(exc)[:120], brain_api=BRAIN_API_URL)
         time.sleep(HEARTBEAT_SECONDS)

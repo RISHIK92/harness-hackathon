@@ -1,29 +1,22 @@
 from __future__ import annotations
 
-from typing import Any
+from fastapi import APIRouter, Depends
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-
-from app.tools.registry import TOOL_SCHEMAS, UnknownToolError, dispatch
+from app.core.auth import get_current_user
+from app.models import User
+from app.tools.registry import TOOL_SCHEMAS
 
 router = APIRouter()
 
+# There used to be a `POST /{tool_name}` here that ran any tool with any
+# arguments — including a `workspace_id` or `repo_id` the caller picked —
+# with no login. That made every tenant's Slack, Jira, docs, past calls and
+# code one unauthenticated request away. Tools run only inside the agent
+# loop now, which forces the tenant scope from the authenticated principal;
+# the code panel's file read-back has its own scoped route
+# (GET /api/repos/{repo_id}/file).
+
 
 @router.get("")
-async def list_tools():
+async def list_tools(current_user: User = Depends(get_current_user)):
     return {"tools": TOOL_SCHEMAS}
-
-
-class ToolCallRequest(BaseModel):
-    args: dict[str, Any] = {}
-
-
-@router.post("/{tool_name}")
-async def call_tool(tool_name: str, payload: ToolCallRequest):
-    try:
-        return await dispatch(tool_name, payload.args)
-    except UnknownToolError:
-        raise HTTPException(status_code=404, detail=f"unknown tool '{tool_name}'")
-    except TypeError as exc:
-        raise HTTPException(status_code=422, detail=f"bad arguments for '{tool_name}': {exc}")

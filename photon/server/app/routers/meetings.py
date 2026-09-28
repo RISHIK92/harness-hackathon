@@ -9,7 +9,7 @@ else.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -17,6 +17,7 @@ from fastapi.responses import PlainTextResponse
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core import service_auth
 from app.core.auth import get_current_user
 from app.core.workspace import get_current_workspace, membership_for, require_role
 from app.database import get_session
@@ -218,25 +219,35 @@ async def append_transcript(
     slug: str,
     payload: TranscriptEntryCreate,
     session: AsyncSession = Depends(get_session),
+    worker_token: Optional[str] = Depends(service_auth.worker_token_header),
 ):
     """Append one line. Called by the call-agent worker as turns finalize.
 
-    Unauthenticated for the same reason /api/agent/ask is (demo scope, see
-    CLAUDE.md): the worker is a server-side component with no user session.
-    Before this is exposed beyond localhost it needs a shared secret — noted
-    rather than pretended away.
+    Worker-only, with the token scoped to this meeting. It used to be open,
+    and it trusts `speaker_identity` — so anyone with a meeting code could
+    write lines as any user, poisoning past-call memory and creating DRAFT
+    agent jobs owned by whoever they named.
     """
     meeting = await _meeting_by_slug(session, slug)
+    service_auth.require_worker(worker_token, service_auth.meeting_scope(meeting.slug))
 
     speaker_user_id = None
     identity = payload.speaker_identity or ""
     if identity.startswith("user:"):
-        # Identity is signed into the LiveKit token by our own API, so the
-        # user id in it is trustworthy — a guest cannot type their way into
-        # being someone else (see client/app/api/livekit-token/route.ts).
+        # The worker read this identity from LiveKit, where our own token
+        # route signed it, and the worker itself is authenticated above — so
+        # a guest cannot type their way into being someone else.
         candidate = identity.split("user:", 1)[1]
         if await session.get(User, candidate):
             speaker_user_id = candidate
+    # "Our side" of the call means a member of THIS workspace. Any signed-in
+    # user used to count, so an admitted outsider with a Photon account got
+    # no whisper suggestions and could create DRAFT jobs in this workspace.
+    member_id = (
+        speaker_user_id
+        if speaker_user_id and await membership_for(session, meeting.workspace_id, speaker_user_id)
+        else None
+    )
 
     entry = TranscriptEntry(
         meeting_id=meeting.id,
@@ -259,10 +270,10 @@ async def append_transcript(
     # A human line is a "client" line for whisper's purposes ONLY when the
     # speaker is not a signed-in workspace member — that is the same
     # distinction whisper cares about (answer what the customer asks, not what
-    # your colleague says), and speaker_user_id above is the trustworthy way
-    # to tell, since it comes from a signed token.
-    await _feed_whisper(session, meeting, payload, speaker_user_id)
-    await _capture_commitment(session, meeting, payload, speaker_user_id)
+    # your colleague says), and member_id above is the trustworthy way to
+    # tell: a signed identity, checked against this workspace's members.
+    await _feed_whisper(session, meeting, payload, member_id)
+    await _capture_commitment(session, meeting, payload, member_id)
     return {"ok": True}
 
 
@@ -472,18 +483,27 @@ async def update_config(
     return meeting
 
 
+# What a guest joining by link may learn: that it is a whisper call (they
+# are the one being transcribed) and whose agent is in the room. Everything
+# else — the workspace id, sources, persona — is for the worker only.
+_PUBLIC_CALL_CONFIG = ("slug", "mode", "display_name", "poc_name")
+
+
 @router.get("/{slug}/call-config")
-async def call_config(slug: str, session: AsyncSession = Depends(get_session)):
+async def call_config(
+    slug: str,
+    session: AsyncSession = Depends(get_session),
+    worker_token: Optional[str] = Depends(service_auth.worker_token_header),
+):
     """Configuration the call-agent worker needs at job start.
 
-    Unauthenticated, like /api/agent/ask, for the same reason: the worker is
-    a server-side component with no user session (see CLAUDE.md). It returns
-    no secrets and no content — only which voice stack and persona this room
-    was configured with — but it does confirm a room exists, so it needs the
-    same shared secret as the transcript endpoint before this is exposed
-    beyond localhost.
+    The full configuration needs the worker's meeting-scoped token; without
+    it the response is cut to _PUBLIC_CALL_CONFIG, which the join page shows
+    to guests. It used to return the workspace id to anyone with the code,
+    and that id was all the (then open) agent route needed.
     """
     meeting = await _meeting_by_slug(session, slug)
+    is_worker = service_auth.is_worker(worker_token, service_auth.meeting_scope(meeting.slug))
     workspace = await session.get(Workspace, meeting.workspace_id)
     from app.services.escalation import first_name
     from app.models import AgentProfile
@@ -499,7 +519,7 @@ async def call_config(slug: str, session: AsyncSession = Depends(get_session)):
     poc_name = first_name(profile.display_name if profile else None,
                           poc.email if poc else None, poc.github_login if poc else None) if poc else None
     company = meeting.attends_as == "company"
-    return {
+    config = {
         "slug": meeting.slug,
         "workspace_id": meeting.workspace_id,
         # What the agent announces itself as on joining. A personal
@@ -526,6 +546,7 @@ async def call_config(slug: str, session: AsyncSession = Depends(get_session)):
         "voice_stack": "sarvam" if (meeting.language_mode or "english") == "multilingual" else "deepgram",
         "enabled_sources": meeting.enabled_sources,
     }
+    return config if is_worker else {k: config[k] for k in _PUBLIC_CALL_CONFIG}
 
 
 # ── Waiting room ─────────────────────────────────────────────────────────
@@ -657,6 +678,12 @@ async def decide_knock(
     return {"id": record.id, "status": record.status}
 
 
+# How long one admission lets its holder (re)join. Long enough for a call
+# and a reconnect; short enough that a knock id found in a browser history
+# next week opens nothing.
+ADMISSION_TTL = timedelta(hours=12)
+
+
 @router.get("/{slug}/admission/{knock_id}")
 async def verify_admission(
     slug: str, knock_id: str, session: AsyncSession = Depends(get_session)
@@ -664,9 +691,22 @@ async def verify_admission(
     """Checked by the token minter before it issues a join token.
 
     The waiting room is only real if the token cannot be obtained without
-    passing through it.
+    passing through it. An admission is bound to the knock: the minter must
+    use `display_name` (what the admitting member saw) and one identity per
+    knock (`identity_key`), so a single admitted knock no longer mints any
+    number of guests under any names. It expires, and an ended meeting
+    admits no one.
     """
     meeting = await _meeting_by_slug(session, slug)
     record = await session.get(MeetingKnock, knock_id)
-    admitted = bool(record and record.meeting_id == meeting.id and record.status == KnockStatus.ADMITTED)
-    return {"admitted": admitted, "display_name": record.display_name if record else None}
+    admitted = bool(
+        record
+        and record.meeting_id == meeting.id
+        and record.status == KnockStatus.ADMITTED
+        and meeting.ended_at is None
+        and record.decided_at is not None
+        and datetime.utcnow() - record.decided_at < ADMISSION_TTL
+    )
+    if not admitted:
+        return {"admitted": False, "display_name": None, "identity_key": None}
+    return {"admitted": True, "display_name": record.display_name, "identity_key": record.id[:12]}

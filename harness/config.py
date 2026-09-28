@@ -42,6 +42,17 @@ def env_bool(name: str, default: bool = False) -> bool:
     return raw.lower() in ("1", "true", "yes", "on")
 
 
+def service_run() -> bool:
+    """HARNESS_SERVICE_RUN: this process is a run the HTTP service started.
+
+    Set by `harness.service` for its child runs and nowhere else. A service
+    run takes its repository from the caller's request, never from the
+    ticket text, and never publishes, pushes or comments by itself: that is
+    what the service's /publish is for, with the caller's token.
+    """
+    return env_bool("HARNESS_SERVICE_RUN")
+
+
 # Phase share of the global token budget (SPEC.md 10.3).
 PHASE_SHARE = {
     "P0": 0.02, "P1": 0.35, "P2": 0.08, "P3": 0.25, "P4": 0.18, "P5": 0.12,
@@ -177,8 +188,10 @@ def load(argv: list[str] | None = None) -> Config:
 
     # A GitHub reference is resolved to issue text and a clone before
     # anything else runs, so every phase downstream sees an ordinary local
-    # repository and ordinary issue text.
-    github_ref = env("GITHUB_ISSUE") or env("GITHUB_PR") or issue
+    # repository and ordinary issue text. Not in a service run: there the
+    # repository is the one the service cloned, and the issue is only text.
+    github_ref = None if service_run() else (
+        env("GITHUB_ISSUE") or env("GITHUB_PR") or issue)
 
     tier = env("HARNESS_TIER")
     if tier and tier.upper() not in TIER_FACTOR:

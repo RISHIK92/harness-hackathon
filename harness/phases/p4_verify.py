@@ -6,6 +6,7 @@ would consume the whole wall-clock budget.
 """
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -160,6 +161,8 @@ class Verifier:
         cmd = self._test_cmd(selector)
         if c.toolchain.junit_flag:
             cmd = f"{cmd} {c.toolchain.junit_flag.format(path=junit)}"
+        # The repository's test command plus a selector of shell-quoted
+        # file names or identifiers (scope_tests); no raw model text.
         result = run(cmd, c.repo, timeout=300, check_deny=False)
         parsed = P.parse(result, c.toolchain, junit_path=junit)
         c.events.append("test_run", "P4",
@@ -178,6 +181,7 @@ class Verifier:
         """(passed, output) for a single test."""
         c = self.ctx
         selector = _selector_for(test_id, c.toolchain)
+        # Test command plus one shell-quoted test id (`_selector_for`).
         result = run(self._test_cmd(selector), c.repo, timeout=120,
                      check_deny=False)
         text = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
@@ -187,6 +191,7 @@ class Verifier:
         """True when the test still fails in isolation."""
         c = self.ctx
         selector = _selector_for(test_id, c.toolchain)
+        # Test command plus one shell-quoted test id (`_selector_for`).
         result = run(self._test_cmd(selector), c.repo, timeout=120,
                      check_deny=False)
         return result.exit_code != 0
@@ -233,12 +238,14 @@ class Verifier:
 
 
 def _selector_for(test_id: str, toolchain) -> str:
+    """One test as shell arguments. The id comes from test output -- a name
+    the repository's code chose -- so it is quoted, never interpolated."""
     if toolchain.language == "python":
         module, _, name = test_id.partition("::")
         path = module.replace(".", "/") + ".py" if "/" not in module else module
-        return f'"{path}::{name}"' if name else f'"{path}"'
+        return shlex.quote(f"{path}::{name}" if name else path)
     if toolchain.language == "go":
         _, _, name = test_id.partition("::")
-        return f"-run '^{name}$' ./..."
+        return f"-run {shlex.quote(f'^{name}$')} ./..."
     _, _, name = test_id.partition("::")
-    return f'-t "{name}"'
+    return f"-t {shlex.quote(name)}"

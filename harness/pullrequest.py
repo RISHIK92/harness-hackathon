@@ -14,7 +14,7 @@ import subprocess
 from dataclasses import dataclass
 
 from . import consent
-from .github import API, _headers
+from .github import API, _headers, clone_auth_env
 from .model.http import request
 from .model.types import ProviderError
 from .verify.runner import run
@@ -70,8 +70,27 @@ def body_for(report: str, ref=None, summary=None) -> str:
     return "\n".join(head) + report
 
 
-def _git(repo, args: str, timeout: float = 120.0):
-    return run(f"git {args}", repo, timeout=timeout, check_deny=False)
+def _git(repo, args: str, timeout: float = 120.0, env: dict | None = None):
+    # Harness-issued, after the consent gate: `git push` is on the deny list
+    # precisely so that only this path, never a model, can push.
+    return run(f"git {args}", repo, timeout=timeout, check_deny=False,
+               env_extra=env)
+
+
+def _push_env(repo) -> dict:
+    """What the harness's own push needs from the operator's environment.
+
+    The runner scrubs credentials from every command, because most of them
+    run the repository's code. This one is the operator's push: their SSH
+    agent, and GITHUB_TOKEN for an https remote -- sent as a header, since a
+    clone no longer writes the token into the remote URL.
+    """
+    env = {}
+    if os.environ.get("SSH_AUTH_SOCK"):
+        env["SSH_AUTH_SOCK"] = os.environ["SSH_AUTH_SOCK"]
+    url = _git(repo, "remote get-url origin", timeout=15).stdout.strip()
+    env.update(clone_auth_env(url))
+    return env
 
 
 def current_branch(repo) -> str:
@@ -132,7 +151,8 @@ def open_pr(repo, gate: consent.Gate, log, root_cause, issue, report: str,
     if not gate.allow(consent.PUSH, f"push {branch} to {slug}", rows):
         return Result(branch=branch, reason="push was not allowed")
 
-    push = _git(repo, f"push --set-upstream origin {branch}")
+    push = _git(repo, f"push --set-upstream origin {branch}",
+                env=_push_env(repo))
     if not push.ok:
         return Result(branch=branch,
                       reason=f"push failed: {push.output[-200:]}")

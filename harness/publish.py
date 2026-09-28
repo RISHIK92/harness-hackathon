@@ -81,8 +81,10 @@ def post_comment(ref: Ref, body: str, log) -> bool:
 
 
 def publish(cfg, log, ref, exit_code: int, summary, report: str) -> None:
-    """Called once, at the very end of a run."""
-    if not ref:
+    """Called once, at the very end of a run. Never in a service run: the
+    service reports to its caller, and posting is the caller's decision."""
+    from .config import service_run
+    if not ref or service_run():
         return
     if not enabled():
         log.line(f"HARNESS_POST is off; the report for {ref} is in "

@@ -59,6 +59,19 @@ def _is_retryable(exc: BaseException) -> bool:
     return isinstance(exc, (httpx.ReadTimeout, httpx.ConnectTimeout))
 
 
+def _record_usage(data: dict, kind: str) -> None:
+    """Every response states what it cost; it used to be thrown away, so
+    there was no way to say what a turn, a meeting or a tenant spends. A
+    structured log line for now — the ledger's usage_record (Phase 2 of
+    ENTERPRISE_ARCHITECTURE.md) is where it is meant to land."""
+    usage = data.get("usage") or {}
+    if usage:
+        log.info("llm.usage", kind=kind, model=data.get("model"),
+                 prompt_tokens=usage.get("prompt_tokens"),
+                 completion_tokens=usage.get("completion_tokens"),
+                 cost=usage.get("cost"))
+
+
 @retry(
     retry=retry_if_exception(_is_retryable),
     wait=wait_exponential(multiplier=2, min=2, max=30),
@@ -100,6 +113,7 @@ def sync_chat(
     response = _client.post(_URL, headers=_headers(), json=body)
     response.raise_for_status()
     data = response.json()
+    _record_usage(data, "chat")
     choices = data.get("choices") or []
     if not choices:
         log.warning("openrouter.no_choices", data=data)
@@ -136,6 +150,7 @@ def sync_chat_vision(prompt: str, image_bytes: bytes, max_tokens: int = 300, tem
     response = _client.post(_URL, headers=_headers(), json=body)
     response.raise_for_status()
     data = response.json()
+    _record_usage(data, "vision")
     choices = data.get("choices") or []
     if not choices:
         log.warning("openrouter.vision_no_choices", data=data)

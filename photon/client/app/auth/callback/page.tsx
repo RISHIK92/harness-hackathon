@@ -14,6 +14,12 @@ export default function AuthCallbackPage() {
 
   useEffect(() => {
     const hash = window.location.hash;
+    const refused = /error=([^&]+)/.exec(hash);
+    if (refused) {
+      setError(decodeURIComponent(refused[1]));
+      window.history.replaceState(null, "", window.location.pathname);
+      return;
+    }
     const match = /token=([^&]+)/.exec(hash);
     if (!match) {
       setError("Missing token in GitHub sign-in redirect.");

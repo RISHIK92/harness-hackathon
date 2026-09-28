@@ -6,7 +6,7 @@ import binascii
 import json
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -15,24 +15,15 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.agent.loop import answer_question
+from app.core import service_auth
 from app.database import get_session
-from app.models import Meeting, Workspace
+from app.models import Meeting, Repo, User, Workspace
 from app.services.meeting_slug import normalise
 from app.services.tool_availability import source_groups, tools_for
 
 
-async def _call_config(session, payload) -> dict:
-    """Persona + allowed tools for this request.
-
-    Returns empty when no meeting is given, which keeps the text console and
-    the tests working exactly as before (all tools, default persona).
-    """
-    if not payload.meeting_slug:
-        return {}
-    result = await session.execute(select(Meeting).where(Meeting.slug == normalise(payload.meeting_slug)))
-    meeting = result.scalars().first()
-    if not meeting:
-        return {}
+async def _meeting_config(session, meeting: Meeting) -> dict:
+    """Persona + allowed tools for a turn inside one meeting."""
     workspace = await session.get(Workspace, meeting.workspace_id)
     groups = await source_groups(session, meeting.workspace_id)
     enabled = meeting.enabled_sources
@@ -55,6 +46,98 @@ async def _call_config(session, payload) -> dict:
         "agent_name": workspace.agent_name if workspace else None,
     }
 
+
+async def _workspace_config(session, workspace: Workspace) -> dict:
+    """A member asking outside any meeting: every source the workspace has
+    actually connected, and nothing it has not. It used to be "all tools",
+    which offered the planner tools for sources that do not exist here."""
+    groups = await source_groups(session, workspace.id)
+    return {
+        "allowed_tools": set(tools_for(groups, [g.key for g in groups if g.available])),
+        "workspace_id": workspace.id,
+        "org_name": None if workspace.is_personal else workspace.name,
+        "agent_name": workspace.agent_name,
+    }
+
+
+async def _user_from_bearer(session, authorization: Optional[str]) -> Optional[User]:
+    """A full session token only. A scoped token (the Chrome extension's) is
+    not a signed-in member and never reaches the agent from here."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    from jose import JWTError, jwt
+
+    from app.config import get_settings
+
+    settings = get_settings()
+    try:
+        claims = jwt.decode(authorization.split(" ", 1)[1], settings.jwt_secret_key,
+                            algorithms=[settings.jwt_algorithm])
+    except JWTError:
+        return None
+    if claims.get("scope") or not claims.get("sub"):
+        return None
+    return await session.get(User, claims["sub"])
+
+
+async def _resolve_turn(request: Request, payload: "AgentAskRequest", session,
+                        authorization: Optional[str], worker_token: Optional[str]) -> dict:
+    """Who is asking, and therefore which tenant, tools and persona apply.
+
+    Two principals, nothing else:
+      - the call-agent worker, with the token scoped to THIS meeting
+        (app/core/service_auth.py) — the meeting decides everything;
+      - a signed-in member — of the meeting's workspace when a meeting is
+        named, else of the workspace they select.
+
+    This route used to be open and took `workspace_id` (and `repo_id`) from
+    the body, which made every tenant's sources one request away. The body's
+    workspace_id is now only a *selection* among the caller's own
+    memberships, and repo_id must belong to the resolved workspace.
+    """
+    from app.core.workspace import ensure_personal_workspace, membership_for
+
+    slug = normalise(payload.meeting_slug) if payload.meeting_slug else None
+    meeting = None
+    if slug:
+        meeting = (await session.execute(select(Meeting).where(Meeting.slug == slug))).scalars().first()
+
+    if worker_token is not None:
+        if meeting is None:
+            raise HTTPException(status_code=404, detail="No meeting with that code")
+        service_auth.require_worker(worker_token, service_auth.meeting_scope(meeting.slug))
+        config = await _meeting_config(session, meeting)
+    else:
+        user = await _user_from_bearer(session, authorization)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Sign in to ask Photon",
+                                headers={"WWW-Authenticate": "Bearer"})
+        if slug:
+            # A member of the meeting's own workspace; anyone else (an
+            # admitted guest, a signed-in outsider) asks out loud, where the
+            # agent answers under the call's own configuration.
+            if meeting is None or not await membership_for(session, meeting.workspace_id, user.id):
+                raise HTTPException(status_code=404, detail="No meeting with that code")
+            config = await _meeting_config(session, meeting)
+        else:
+            requested = request.headers.get("x-workspace-id") or payload.workspace_id
+            if requested:
+                if not await membership_for(session, requested, user.id):
+                    raise HTTPException(status_code=404, detail="Workspace not found")
+                workspace = await session.get(Workspace, requested)
+                if workspace is None:
+                    raise HTTPException(status_code=404, detail="Workspace not found")
+            else:
+                workspace = await ensure_personal_workspace(session, user)
+            config = await _workspace_config(session, workspace)
+
+    if payload.repo_id:
+        repo = await session.get(Repo, payload.repo_id)
+        if repo is None or repo.workspace_id != config["workspace_id"]:
+            raise HTTPException(status_code=404, detail="Repo not found")
+    return config
+
+
 router = APIRouter()
 
 
@@ -68,24 +151,18 @@ class HistoryTurn(BaseModel):
 class AgentAskRequest(BaseModel):
     question: str
     # The conversation so far, oldest first. Without it a follow-up ("why is
-    # that?") has no referent at all. Client-asserted like workspace_id on
-    # this still-unauthenticated route — but it is only ever read as prose
-    # for the model to resolve a pronoun against, never as instructions, and
-    # it cannot widen which tools run or which tenant is read: both of those
-    # are resolved server-side from the meeting and forced onto every call.
+    # that?") has no referent at all. Client-supplied — but it is only ever
+    # read as prose for the model to resolve a pronoun against, never as
+    # instructions, and it cannot widen which tools run or which tenant is
+    # read: both are resolved server-side from the principal (_resolve_turn).
     history: Optional[List[HistoryTurn]] = None
     repo_id: Optional[str] = None
     screen_context: Optional[str] = None
     screen_image_base64: Optional[str] = None  # a JPEG frame, base64-encoded
     language: Optional[str] = None  # BCP-47 (te-IN, ta-IN, hi-IN, en-IN) — answer in this
-    # Which tenant's connected sources may be searched. Absent = the demo
-    # corpus only, which is what keeps the seeded scenarios working. Only
-    # consulted when repo_id is omitted — lets the loop disambiguate across
-    # a workspace's repos instead of falling back to the single seed repo.
-    # This endpoint is still unauthenticated (see CLAUDE.md's Phase 3
-    # note), so workspace_id here is client-asserted, not verified against
-    # a session — the same trust boundary as everything else on this route
-    # today, not a new gap introduced by this field.
+    # Which of the caller's OWN workspaces to answer from, when no meeting is
+    # named (the X-Workspace-Id header wins). A selection, never a grant:
+    # _resolve_turn 404s unless the signed-in caller is a member.
     workspace_id: Optional[str] = None
     # When present, the call's own configuration decides the persona and
     # which sources may be used. Resolved server-side rather than trusted
@@ -104,7 +181,13 @@ def _decode_frame(payload: "AgentAskRequest") -> Optional[bytes]:
 
 
 @router.post("/ask/stream")
-async def ask_stream(payload: AgentAskRequest, session: AsyncSession = Depends(get_session)):
+async def ask_stream(
+    payload: AgentAskRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    authorization: Optional[str] = Header(default=None),
+    worker_token: Optional[str] = Depends(service_auth.worker_token_header),
+):
     """Server-sent events for one turn, emitted AS IT HAPPENS: plan.start,
     tool.start/tool.done (with per-tool ms), compose, verify, turn.done.
 
@@ -116,7 +199,7 @@ async def ask_stream(payload: AgentAskRequest, session: AsyncSession = Depends(g
     running while it's still running.
     """
     screen_image_bytes = _decode_frame(payload)
-    config = await _call_config(session, payload)
+    config = await _resolve_turn(request, payload, session, authorization, worker_token)
     queue: asyncio.Queue[Optional[dict[str, Any]]] = asyncio.Queue()
 
     def sink(event: dict[str, Any]) -> None:
@@ -134,8 +217,8 @@ async def ask_stream(payload: AgentAskRequest, session: AsyncSession = Depends(g
                 screen_image_bytes,
                 on_event=sink,
                 language=payload.language,
-                workspace_id=config.get("workspace_id") or payload.workspace_id,
-                allowed_tools=config.get("allowed_tools"),
+                workspace_id=config["workspace_id"],
+                allowed_tools=config["allowed_tools"],
                 bot_types=config.get("bot_types"),
                 org_name=config.get("org_name"),
                 agent_name=config.get("agent_name"),
@@ -171,11 +254,14 @@ async def ask_stream(payload: AgentAskRequest, session: AsyncSession = Depends(g
 @router.post("/ask")
 async def ask(
     payload: AgentAskRequest,
+    request: Request,
     stream: bool = Query(default=False),
     session: AsyncSession = Depends(get_session),
+    authorization: Optional[str] = Header(default=None),
+    worker_token: Optional[str] = Depends(service_auth.worker_token_header),
 ):
     screen_image_bytes = _decode_frame(payload)
-    config = await _call_config(session, payload)
+    config = await _resolve_turn(request, payload, session, authorization, worker_token)
 
     result = await answer_question(
         payload.question,
@@ -183,8 +269,8 @@ async def ask(
         payload.screen_context,
         screen_image_bytes,
         language=payload.language,
-        workspace_id=config.get("workspace_id") or payload.workspace_id,
-        allowed_tools=config.get("allowed_tools"),
+        workspace_id=config["workspace_id"],
+        allowed_tools=config["allowed_tools"],
         bot_types=config.get("bot_types"),
         org_name=config.get("org_name"),
         agent_name=config.get("agent_name"),

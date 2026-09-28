@@ -183,7 +183,7 @@ async def read_file(path: str, repo_id: str | None = None, start: int | None = N
     full_path = os.path.join(repo.local_path, path.lstrip("/"))
     repo_root = os.path.realpath(repo.local_path)
     real = os.path.realpath(full_path)
-    if not real.startswith(repo_root):
+    if real != repo_root and not real.startswith(repo_root + os.sep):
         return tool_error("read_file", "path traversal denied")
     if not os.path.isfile(full_path):
         return tool_result("read_file", [], note=f"file not found: {path}")

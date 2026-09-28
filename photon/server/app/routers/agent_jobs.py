@@ -163,9 +163,14 @@ async def create_job(
         raise HTTPException(status_code=422, detail="That repository has no clone URL to fix against")
     if not body.title.strip():
         raise HTTPException(status_code=422, detail="A ticket needs a title")
+    # Always MANUAL from the console. `source` decides where plan and outcome
+    # comments are posted, and a client-chosen "github" + any ticket_ref let
+    # a member make Photon comment on an arbitrary owner/repo#N with the
+    # installation's token. GitHub and Linear jobs are created by their
+    # signed webhooks only.
     job = AgentJob(
         workspace_id=workspace.id, owner_user_id=user.id, repo_id=repo.id,
-        source=body.source.value, ticket_ref=body.ticket_ref, ticket_url=body.ticket_url,
+        source=AgentJobSource.MANUAL.value, ticket_ref=body.ticket_ref, ticket_url=body.ticket_url,
         title=body.title.strip(), issue_text=rules.issue_text(body.title, body.body, body.context),
     )
     session.add(job)
@@ -496,7 +501,7 @@ async def _on_linear_comment(session: AsyncSession, comment_id: Optional[str]) -
     decided = []
     for conn, creds in await _linear_connections(session):
         comment = linear_tickets.fetch_comment(creds, comment_id)
-        if not comment:
+        if not comment or linear_tickets.is_photon_comment(comment.get("body") or ""):
             continue
         command = rules.parse_command(comment.get("body") or "")
         issue_uuid = (comment.get("issue") or {}).get("id")

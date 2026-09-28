@@ -19,6 +19,10 @@ What it adds is the part around a run that a caller cannot do for itself:
     publish   commit, push and open the pull request with a token the CALLER
               supplies. The harness never holds a standing credential, and
               its own push/PR/comment consent stays off for every run.
+              The change is taken out of the run's checkout as a patch and
+              committed from a fresh clone: the checkout is where the
+              repository's own code ran, and nothing it left behind (hooks,
+              config) is anywhere near the token.
 
 Endpoints (JSON in, JSON out):
 
@@ -38,13 +42,19 @@ Environment:
     HARNESS_SERVICE_PORT     default 8765
     HARNESS_SERVICE_HOME     default ./.harness/service
     HARNESS_SERVICE_WORKERS  concurrent runs, default 2
+    HARNESS_SERVICE_ALLOW_LOCAL
+                             1 lets callers name a local `repo.path` (or any
+                             non-https URL). Local development only: it lets
+                             any caller read any repository on this machine.
 
 AI_API_KEY and the other HARNESS_* settings are read from the service's own
 environment and passed through to every run, exactly as `make run` would.
+Each run is marked HARNESS_SERVICE_RUN=1, which keeps the CLI from reading
+a repository out of the ticket text and from publishing anything itself.
 """
 from __future__ import annotations
 
-import base64
+import hashlib
 import hmac
 import json
 import os
@@ -53,6 +63,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -62,21 +73,43 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import exits
+from .github import auth_env
+from .repo.paths import norm
+from .repo.workspace import scaffolding
+from .verify.runner import is_secret
 
 ROOT = Path(__file__).resolve().parent.parent
 ARTIFACTS = ("issue.json", "baseline.json", "rootcause.json", "scope.json",
              "verification.json", "confidence.json", "diff.patch",
              "run_report.md", "error.log")
 MODES = ("plan", "fix")
-PUBLISHABLE = (exits.SUCCESS, exits.PARTIAL)
 MAX_BODY = 2_000_000
 
 # The caller decides which of these a run may override. Anything else --
 # above all AI_API_KEY and the consent settings -- is the service's to set.
+# Not HARNESS_TEST_CMD or HARNESS_LINT_CMD: each is a shell command the run
+# executes on this machine, so letting a caller set one was letting any
+# caller run anything here.
 OVERRIDABLE = {"HARNESS_MODEL", "HARNESS_CHEAP_MODEL", "HARNESS_PROVIDER",
                "HARNESS_TIER", "HARNESS_TIME_BUDGET", "HARNESS_TOKEN_BUDGET",
-               "HARNESS_MAX_CYCLES", "HARNESS_TEST_CMD", "HARNESS_LINT_CMD",
-               "HARNESS_DOCKER"}
+               "HARNESS_MAX_CYCLES", "HARNESS_DOCKER"}
+
+# The service's own git, on a checkout a repository's code has run in.
+# Hooks, fsmonitor and credential helpers are how a checkout (or the
+# operator's machine) runs code or hands out a credential when git touches
+# it; none is wanted. An empty `credential.helper` resets the list, so the
+# only credential any command carries is the caller's token.
+SAFE_GIT = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+            "-c", "credential.helper=", "-c", "core.quotePath=false")
+
+# What git needs from the service's environment, and nothing else: not
+# AI_API_KEY, not the service token.
+GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER",
+           "LOGNAME", "SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_SSL_CAINFO",
+           "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+           "NO_PROXY", "no_proxy", "GIT_EXEC_PATH", "SYSTEMROOT")
+
+BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 
 
 class RequestError(Exception):
@@ -101,6 +134,7 @@ class Run:
     outcome: str | None = None
     error: str | None = None
     checkout: str | None = None
+    base: str | None = None       # the commit the checkout started from
     scope_check: dict | None = None
     published: dict | None = None
     created_at: float = field(default_factory=time.time)
@@ -139,28 +173,80 @@ def read_artifacts(folder: Path) -> dict:
 
 # -- git helpers ---------------------------------------------------------------
 
-def auth_env(token: str | None) -> dict:
-    """A token for one git command, carried in the environment.
-
-    Never in the URL and never in argv: a URL with a token in it is written
-    into .git/config by `clone`, and argv is readable by every process on the
-    machine.
-    """
-    if not token:
-        return {}
-    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    return {"GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "http.extraHeader",
-            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
-            "GIT_TERMINAL_PROMPT": "0"}
+def git_env(extra: dict | None = None) -> dict:
+    env = {k: os.environ[k] for k in GIT_ENV
+           if k in os.environ and not is_secret(k, os.environ[k])}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env.update(extra or {})
+    return env
 
 
 def git(args: list[str], cwd: Path | None, token: str | None = None,
-        timeout: float = 600) -> subprocess.CompletedProcess:
-    env = {**os.environ, **auth_env(token)}
-    return subprocess.run(["git", *args], cwd=cwd, env=env, text=True,
-                          stdin=subprocess.DEVNULL, capture_output=True,
-                          timeout=timeout)
+        timeout: float = 600, env: dict | None = None,
+        data: bytes | None = None,
+        text: bool = True) -> subprocess.CompletedProcess:
+    """One git command, with hooks off and a minimal environment. The token,
+    when there is one, is in that environment only (`auth_env`)."""
+    extra = {} if data is None else {"input": data}
+    return subprocess.run(
+        ["git", *SAFE_GIT, *args], cwd=cwd,
+        env=git_env({**auth_env(token), **(env or {})}),
+        stdin=None if data is not None else subprocess.DEVNULL,
+        capture_output=True, timeout=timeout, **extra,
+        **({"text": True, "errors": "replace"} if text else {}))
+
+
+def _out(res: subprocess.CompletedProcess) -> str:
+    raw = res.stderr or res.stdout or b""
+    return raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+
+
+def make_patch(checkout: Path, base: str) -> tuple[bytes, list[str]]:
+    """The run's change against `base`, as a binary patch, and its paths.
+
+    This is what /publish commits and what the scope check judges, so the
+    two can never disagree. `git diff HEAD` -- diff.patch -- cannot see a
+    file the fix created; staging the tree into a scratch index can, and
+    leaves the checkout's own index alone for the next fix run. Diffing
+    against the commit the checkout STARTED from means a commit made in it
+    meanwhile is part of the change rather than a reason it is "empty".
+
+    It reads a checkout the repository's code ran in, so it runs with no
+    token in its environment and with hooks off (`git`). Untracked files
+    are the fix's new files, less the run's by-products (`scaffolding`).
+    """
+    with tempfile.TemporaryDirectory(prefix="harness-patch-") as tmp:
+        env = {"GIT_INDEX_FILE": str(Path(tmp) / "index"),
+               "GIT_LITERAL_PATHSPECS": "1"}
+        steps = (["read-tree", base],
+                 ["add", "-u", "--", "."],)
+        for args in steps:
+            res = git(args, checkout, env=env, timeout=300, text=False)
+            if res.returncode != 0:
+                raise RuntimeError(f"git {args[0]} failed: {_out(res)[-300:]}")
+        res = git(["ls-files", "-z", "--others", "--exclude-standard"],
+                  checkout, env=env, timeout=300, text=False)
+        new = [p for p in res.stdout.decode("utf-8", "surrogateescape")
+               .split("\0") if p and not scaffolding(p)]
+        if new:
+            res = git(["add", "--pathspec-from-file=-",
+                       "--pathspec-file-nul"], checkout, env=env,
+                      timeout=300, text=False, data="\0".join(new).encode(
+                          "utf-8", "surrogateescape"))
+            if res.returncode != 0:
+                raise RuntimeError(f"git add failed: {_out(res)[-300:]}")
+        diff = ["diff", "--cached", "--no-renames", "--no-ext-diff",
+                "--no-textconv"]
+        patch = git([*diff, "--binary", base, "--"], checkout, env=env,
+                    timeout=300, text=False)
+        names = git([*diff, "--name-only", "-z", base, "--"], checkout,
+                    env=env, timeout=300, text=False)
+        if patch.returncode != 0 or names.returncode != 0:
+            raise RuntimeError(f"git diff failed: "
+                               f"{_out(patch if patch.returncode else names)[-300:]}")
+    paths = [p for p in names.stdout.decode("utf-8", "surrogateescape")
+             .split("\0") if p]
+    return patch.stdout, paths
 
 
 def github_slug(url: str) -> str | None:
@@ -180,15 +266,22 @@ def changed_paths(diff: str) -> list[str]:
     return paths
 
 
-def check_scope(diff: str, scope: dict) -> dict:
+def check_scope(diff: str, scope: dict, paths: list[str] | None = None) -> dict:
     """Is every changed file inside what was approved?
 
     An empty approval list means the caller approved the plan as-is and
-    asked for no narrowing, so only the must-not list applies.
+    asked for no narrowing, so only the must-not list applies. `paths`,
+    when given, is the change's file list (`make_patch`), which includes
+    new files; otherwise it is read from `diff`.
+
+    Paths are canonicalised, not `lstrip("./")`-ed: that strips characters,
+    so an approved `.github/workflows/ci.yml` became `github/...` and could
+    never match the file it named.
     """
-    changed = changed_paths(diff)
-    allowed = {p.lstrip("./") for p in scope.get("files") or []}
-    forbidden = {p.lstrip("./") for p in scope.get("must_not") or []}
+    changed = [norm(p) for p in paths] if paths is not None \
+        else changed_paths(diff)
+    allowed = {norm(p) for p in scope.get("files") or []}
+    forbidden = {norm(p) for p in scope.get("must_not") or []}
     outside = [p for p in changed if allowed and p not in allowed]
     touched_forbidden = [p for p in changed if p in forbidden]
     return {"ok": not outside and not touched_forbidden,
@@ -214,12 +307,20 @@ def scoped_issue(issue: str, scope: dict) -> str:
 
 class Service:
     def __init__(self, home: Path, workers: int = 2,
-                 command: list[str] | None = None) -> None:
+                 command: list[str] | None = None,
+                 allow_local: bool | None = None) -> None:
         self.home = Path(home).resolve()
         (self.home / "runs").mkdir(parents=True, exist_ok=True)
         self.command = command or [sys.executable, "-m", "harness"]
+        # A local path is any repository on this machine, readable by any
+        # caller holding the service token. Development only, and only when
+        # the operator says so.
+        self.allow_local = allow_local if allow_local is not None else \
+            os.environ.get("HARNESS_SERVICE_ALLOW_LOCAL", "").strip().lower() \
+            in ("1", "true", "yes", "on")
         self.runs: dict[str, Run] = {}
         self.procs: dict[str, subprocess.Popen] = {}
+        self.publishing: set[str] = set()
         self.lock = threading.Lock()
         self.slots = threading.Semaphore(max(1, workers))
         self._load()
@@ -262,13 +363,10 @@ class Service:
             base = self.get(from_run)
             if base.status != "done" or not base.checkout:
                 raise RequestError(409, "from_run has no finished checkout")
-            if any(r.from_run == from_run and r.status in ("queued", "running")
-                   for r in self.runs.values()):
-                raise RequestError(409, "a run already uses that checkout")
             issue = issue or base.issue
             repo = base.repo
-        elif not (repo.get("url") or repo.get("path")):
-            raise RequestError(400, "repo.url or repo.path is required")
+        else:
+            self._check_repo(repo)
         if not issue:
             raise RequestError(400, "issue is required")
         env = {k: str(v) for k, v in (body.get("env") or {}).items()
@@ -277,12 +375,46 @@ class Service:
                   repo={k: repo[k] for k in ("url", "path", "ref") if repo.get(k)},
                   scope=body.get("scope") or {}, env=env, from_run=from_run)
         with self.lock:
+            # Checked and claimed in one step. Checked outside the lock, two
+            # requests arriving together both saw the checkout free, and two
+            # fix runs edited one working tree at once.
+            if from_run and any(r.from_run == from_run
+                                and r.status in ("queued", "running")
+                                for r in self.runs.values()):
+                raise RequestError(409, "a run already uses that checkout")
             self.runs[run.id] = run
             self._save(run)
         token = body.get("token")      # used for the clone, then dropped
         threading.Thread(target=self._execute, args=(run, token),
                          daemon=True, name=f"run-{run.id}").start()
         return run
+
+    def _check_repo(self, repo: dict) -> None:
+        """A repository a caller may name: an https URL, and nothing else.
+
+        A local path clones whatever is on this machine; `file://`, `ext::`
+        and a bare path do the same by another spelling; and the caller's
+        token is sent as an https header, so https is the one transport
+        whose credential is the caller's rather than this machine's.
+        HARNESS_SERVICE_ALLOW_LOCAL=1 lifts this, for local development.
+        """
+        if not isinstance(repo, dict):
+            raise RequestError(400, "repo must be an object")
+        url, path = str(repo.get("url") or ""), repo.get("path")
+        if not (url or path):
+            raise RequestError(400, "repo.url is required")
+        if str(repo.get("ref") or "").startswith("-"):
+            raise RequestError(400, "repo.ref is not a git reference")
+        if re.match(r"^[a-z][\w+.-]*://[^/]*@", url, re.I):
+            raise RequestError(400, "repo.url carries a credential; send "
+                                    "the token as `token` instead")
+        if self.allow_local:
+            return
+        if path:
+            raise RequestError(400, "repo.path is not accepted: name the "
+                                    "repository by its https URL")
+        if not re.match(r"^https://[^/\s]+/\S+$", url):
+            raise RequestError(400, "repo.url must be an https URL")
 
     # -- execute ----------------------------------------------------------
     def _execute(self, run: Run, token: str | None) -> None:
@@ -301,8 +433,7 @@ class Service:
                 run.exit_code = code
                 run.outcome = exits.REASON.get(code, str(code))
                 if run.mode == "fix":
-                    diff = read_artifacts(folder / "artifacts").get("diff", "")
-                    run.scope_check = check_scope(diff, run.scope)
+                    run.scope_check = self._scope_check(run, checkout)
                 if run.status != "cancelled":
                     run.status = "done"
             except Exception as exc:          # a run must always finish
@@ -313,9 +444,42 @@ class Service:
                 self.procs.pop(run.id, None)
                 self._save(run)
 
+    def _scope_check(self, run: Run, checkout: Path) -> dict:
+        """The scope verdict on exactly what /publish would commit.
+
+        Judged on `make_patch`, not on diff.patch: that is `git diff HEAD`,
+        which does not list a file the fix created, so a new file anywhere
+        passed the scope check and was then published. The patch's hash is
+        kept, and /publish refuses a checkout that no longer produces it.
+        """
+        try:
+            patch, paths = make_patch(checkout, self._base(run, checkout))
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            return {"ok": False, "changed": [], "outside": [],
+                    "forbidden": [], "error": str(exc)[:300]}
+        verdict = check_scope("", run.scope, paths)
+        verdict["patch_sha256"] = hashlib.sha256(patch).hexdigest()
+        return verdict
+
+    def _base(self, run: Run, checkout: Path) -> str:
+        """The commit the run's checkout started from."""
+        if run.base:
+            return run.base
+        if run.from_run and run.from_run in self.runs \
+                and self.runs[run.from_run].base:
+            return self.runs[run.from_run].base
+        # A run recorded before the base was: its checkout's HEAD is the
+        # best that is left.
+        res = git(["rev-parse", "--verify", "HEAD^{commit}"], checkout)
+        if res.returncode != 0:
+            raise RuntimeError("the checkout has no base commit")
+        return res.stdout.strip()
+
     def _checkout(self, run: Run, folder: Path, token: str | None) -> Path:
         if run.from_run:
-            return Path(self.get(run.from_run).checkout)
+            plan = self.get(run.from_run)
+            run.base = plan.base
+            return Path(plan.checkout)
         target = folder / "checkout"
         if target.exists():
             shutil.rmtree(target)
@@ -330,15 +494,24 @@ class Service:
             if res.returncode != 0:
                 raise RuntimeError(f"checkout {run.repo['ref']} failed: "
                                    f"{res.stderr.strip()[-400:]}")
+        # Recorded before any of the repository's code runs: every later
+        # patch is taken against this commit, whatever the checkout's HEAD
+        # says by then.
+        res = git(["rev-parse", "--verify", "HEAD^{commit}"], target)
+        run.base = res.stdout.strip() if res.returncode == 0 else None
         return target
 
     def _invoke(self, run: Run, folder: Path, checkout: Path) -> int:
         env = {**os.environ, **run.env}
         for name in ("ISSUE", "ISSUE_FILE", "GITHUB_ISSUE", "GITHUB_PR",
                      "HARNESS_REPLAY", "HARNESS_DRY_RUN", "GITHUB_TOKEN",
-                     "GH_TOKEN"):
+                     "GH_TOKEN", "HARNESS_SERVICE_TOKEN"):
             env.pop(name, None)
         env.update({
+            # The CLI's service mode: the repository is REPO_PATH and nothing
+            # in the ticket text; no commit, push, pull request or comment
+            # of its own -- publishing is /publish, from a clean clone.
+            "HARNESS_SERVICE_RUN": "1",
             "ISSUE": scoped_issue(run.issue, run.scope if run.mode == "fix"
                                   else {}),
             "REPO_PATH": str(checkout),
@@ -414,9 +587,14 @@ class Service:
             return run.published
         if run.mode != "fix" or run.status != "done":
             raise RequestError(409, "only a finished fix run can be published")
-        if run.exit_code not in PUBLISHABLE:
-            raise RequestError(409, f"the run did not produce a fix "
-                                    f"({run.outcome})")
+        # The CLI's rule, on the run's own evidence. The exit code alone let
+        # a PARTIAL run whose hard gates failed -- a broken test, a file
+        # outside the plan -- go out as a pull request.
+        art = read_artifacts(self.home / "runs" / run.id / "artifacts")
+        refusal = exits.publish_refusal(run.exit_code, art.get("confidence"),
+                                        art.get("verification"))
+        if refusal:
+            raise RequestError(409, f"the run cannot be published: {refusal}")
         if not (run.scope_check or {}).get("ok"):
             raise RequestError(409, "the change is outside the approved scope")
         token = body.get("token")
@@ -424,11 +602,54 @@ class Service:
         title = (body.get("title") or "").strip()
         if not (token and branch and title):
             raise RequestError(400, "token, branch and title are required")
+        if not BRANCH.fullmatch(branch) or ".." in branch \
+                or branch.endswith((".lock", "/")):
+            raise RequestError(400, "branch is not a valid branch name")
         slug = github_slug(run.repo.get("url", ""))
         if not slug:
             raise RequestError(409, "the run's repository is not on GitHub")
-        repo = Path(run.checkout)
-        base = body.get("base") or self._default_branch(repo)
+        with self.lock:
+            if run_id in self.publishing:
+                raise RequestError(409, "this run is already being published")
+            self.publishing.add(run_id)
+        try:
+            result = self._publish(run, body, token, branch, title, slug)
+        finally:
+            with self.lock:
+                self.publishing.discard(run_id)
+        run.published = result
+        self._save(run)
+        return result
+
+    def _publish(self, run: Run, body: dict, token: str, branch: str,
+                 title: str, slug: str) -> dict:
+        """Commit and push the run's change from a clone made for it.
+
+        The run's checkout is where the repository's own code ran -- its
+        install scripts, its tests, a model-written test -- so it can hold
+        a planted `.git/hooks/pre-commit`, a `core.fsmonitor` command, a
+        `url.*.insteadOf` pointing the push somewhere else. Committing and
+        pushing there ran all of it with the caller's write token in the
+        environment. Now the checkout is only READ, without the token
+        (`make_patch`); the commit and the push happen in a fresh clone of
+        the remote, where nothing of the run's exists but the patch.
+        """
+        checkout = Path(run.checkout)
+        try:
+            base_commit = self._base(run, checkout)
+            patch, _paths = make_patch(checkout, base_commit)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            raise RequestError(500, f"could not read the change: {exc}") \
+                from None
+        digest = hashlib.sha256(patch).hexdigest()
+        if not patch.strip():
+            raise RequestError(409, "the run left no change to publish")
+        expected = (run.scope_check or {}).get("patch_sha256")
+        if expected and expected != digest:
+            # Another fix run shares this checkout. What would go out is not
+            # what the scope check approved.
+            raise RequestError(409, "the checkout changed after the run "
+                                    "finished; publish the latest fix run")
 
         author = body.get("author") or {}
         name = author.get("name") or "harness"
@@ -436,25 +657,38 @@ class Service:
         message = title
         if body.get("trailers"):
             message += "\n\n" + "\n".join(body["trailers"])
-        for args in (["checkout", "-q", "-B", branch],
-                     ["add", "-A"],
-                     ["-c", f"user.name={name}", "-c", f"user.email={email}",
-                      "commit", "-q", "-m", message]):
-            res = git(args, repo)
+        source = run.repo.get("url") or str(Path(run.repo["path"]).resolve())
+
+        with tempfile.TemporaryDirectory(prefix="harness-publish-") as tmp:
+            clone, patch_file = Path(tmp) / "repo", Path(tmp) / "change.patch"
+            patch_file.write_bytes(patch)
+            res = git(["clone", "--quiet", "--no-checkout", source,
+                       str(clone)], Path(tmp), token)
             if res.returncode != 0:
-                raise RequestError(500, f"git {args[0]} failed: "
-                                        f"{(res.stderr or res.stdout)[-300:]}")
-        push = git(["push", "--force-with-lease", "origin",
-                    f"HEAD:refs/heads/{branch}"], repo, token)
-        if push.returncode != 0:
-            raise RequestError(502, f"push failed: {push.stderr.strip()[-300:]}")
+                raise RequestError(502, f"clone for publishing failed: "
+                                        f"{res.stderr.strip()[-300:]}")
+            base = body.get("base") or self._default_branch(clone)
+            for args in (["checkout", "-q", "-B", branch, base_commit],
+                         ["apply", "--index", "--binary", str(patch_file)],
+                         ["-c", f"user.name={name}", "-c", f"user.email={email}",
+                          "commit", "-q", "-m", message]):
+                res = git(args, clone)
+                if res.returncode != 0:
+                    raise RequestError(500, f"git {args[0]} failed: "
+                                            f"{(res.stderr or res.stdout)[-300:]}")
+            push = git(["push", "--force-with-lease", "origin",
+                        f"HEAD:refs/heads/{branch}"], clone, token)
+            if push.returncode != 0:
+                raise RequestError(502, f"push failed: "
+                                        f"{push.stderr.strip()[-300:]}")
 
         pr = github_request("POST", f"/repos/{slug}/pulls", token, {
             "title": title, "body": body.get("body") or "",
             "head": branch, "base": base,
             "draft": bool(body.get("draft"))})
         result = {"branch": branch, "base": base,
-                  "url": pr.get("html_url"), "number": pr.get("number")}
+                  "url": pr.get("html_url"), "number": pr.get("number"),
+                  "patch_sha256": digest}
         reviewers = [r for r in body.get("reviewers") or [] if r]
         if reviewers and pr.get("number"):
             try:
@@ -463,8 +697,6 @@ class Service:
                                {"reviewers": reviewers})
             except RequestError as exc:
                 result["reviewer_error"] = str(exc)
-        run.published = result
-        self._save(run)
         return result
 
     @staticmethod

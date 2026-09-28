@@ -8,6 +8,8 @@ never lets an LLM bridge the gap with a plausible-sounding invention.
 """
 from __future__ import annotations
 
+import asyncio
+
 import re
 
 import structlog
@@ -84,6 +86,15 @@ def _slack_thread_for(ticket_id: str | None, pr: dict | None) -> list[dict]:
     return thread
 
 
+def _seed_repo_id() -> str | None:
+    from app.seed.loader import get_seed_repo_id
+
+    try:
+        return get_seed_repo_id()
+    except Exception:  # noqa: BLE001 - no seed repo means no fixture chain, never an error
+        return None
+
+
 async def explain_why(symbol_or_path: str, repo_id: str | None = None) -> dict:
     if not repo_id:
         # code -> commit -> ticket -> PR -> Slack is a per-repo chain (the
@@ -101,6 +112,18 @@ async def explain_why(symbol_or_path: str, repo_id: str | None = None) -> dict:
     if not code_evidence:
         # symbol_or_path was already a path; add a placeholder locator hop so the file itself is cited
         evidence.append(make_evidence("code", file_path, f"starting point: {file_path}", 1.0))
+
+    # The commit -> ticket -> PR -> Slack hops are joined from the fictional
+    # Meridian fixtures (app/seed/data), which exist only for the seed repo.
+    # They used to be joined for ANY repo, so a real repository whose paths
+    # happened to match a fixture (app/main.py, app/config.py, ...) got made-
+    # up commits, PRs and Slack decisions cited as its history. Until real
+    # git/PR history is ingested, the chain stops honestly at the code.
+    if repo_id != await asyncio.to_thread(_seed_repo_id):
+        return tool_result(
+            "explain_why", evidence,
+            note="commit, PR and discussion history is not indexed for this repository yet — chain stops at code",
+        )
 
     commits = _commits_touching(file_path)
     if not commits:

@@ -1,16 +1,37 @@
 from __future__ import annotations
+import hashlib
+import hmac
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # App
-    app_env: str = "development"
+    # Fail-closed default: a deployment that forgets APP_ENV is production —
+    # dev routers stay unmounted and default secrets refuse to boot
+    # (validate_security below). Local development opts in with
+    # APP_ENV=development, which .env.example already sets.
+    app_env: str = "production"
     secret_key: str = "changeme"
     api_key: str = "yasml-dev-key"
+
+    # Browser origins allowed to call the API with credentials. Empty means
+    # client_base_url only. Comma-separated in .env.
+    cors_origins: str = ""
+
+    # Service-to-service credential for the call-agent worker (transcript,
+    # call-config, escalations, the agent ask stream, heartbeat). Unset, it
+    # is derived from LIVEKIT_API_SECRET, which the worker, this API and the
+    # token-minting route already share — see app/core/service_auth.py.
+    worker_service_token: str = Field(default="", alias="WORKER_SERVICE_TOKEN")
+    livekit_api_secret: str = Field(default="", alias="LIVEKIT_API_SECRET")
+
+    # /dev/ask answers as any user with no password. Development alone is not
+    # enough to mount it: it also needs this explicit opt-in.
+    enable_dev_impersonation: bool = False
 
     # PostgreSQL
     postgres_host: str = "localhost"
@@ -221,10 +242,59 @@ class Settings(BaseSettings):
     rerank_model: str = "rerank-2.5-lite"
     rerank_pool: int = 20
 
-    # JWT
-    jwt_secret_key: str = Field(default="change-me-in-production-jwt-secret", alias="JWT_SECRET_KEY")
+    # JWT. Unset, the signing key is derived from secret_key (domain-
+    # separated, so the Fernet key and the JWT key are never the same bytes).
+    # The old public default is still refused if someone sets it explicitly.
+    jwt_secret_key: str = Field(default="", alias="JWT_SECRET_KEY")
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 10080  # 7 days
+
+    @model_validator(mode="after")
+    def _derive_jwt_key(self) -> "Settings":
+        if not self.jwt_secret_key:
+            self.jwt_secret_key = hmac.new(
+                self.secret_key.encode(), b"photon-jwt-v1", hashlib.sha256
+            ).hexdigest()
+        return self
+
+    @property
+    def allowed_origins(self) -> list[str]:
+        listed = [o.strip().rstrip("/") for o in self.cors_origins.split(",") if o.strip()]
+        return listed or [self.client_base_url.rstrip("/")]
+
+    def insecure_defaults(self) -> list[str]:
+        """Secrets still at a value that is public (it is in this file)."""
+        problems = []
+        if self.secret_key in _PUBLIC_SECRETS or len(self.secret_key) < 16:
+            problems.append("SECRET_KEY is unset, a published default, or shorter than 16 characters")
+        if self.jwt_secret_key in _PUBLIC_SECRETS:
+            problems.append("JWT_SECRET_KEY is set to a published default")
+        return problems
+
+
+# Values that have appeared in this repository as defaults. A key anyone can
+# read here signs anyone's session and decrypts every stored connector token.
+_PUBLIC_SECRETS = {"", "changeme", "change-me-in-production-jwt-secret", "yasml-dev-key"}
+
+
+def validate_security(settings: "Settings") -> None:
+    """Refuse to serve with public secrets anywhere but explicit development.
+
+    Called once at startup. Development keeps working with a loud warning so
+    a fresh checkout still boots; every other APP_ENV (including the default)
+    refuses, because that is the deployment where the default secret would
+    let anyone mint a session for any user id.
+    """
+    problems = settings.insecure_defaults()
+    if not problems:
+        return
+    message = "insecure configuration: " + "; ".join(problems)
+    if settings.app_env == "development":
+        import structlog
+
+        structlog.get_logger().warning("config.insecure_defaults", detail=message)
+        return
+    raise RuntimeError(message + f" (APP_ENV={settings.app_env!r}; set real secrets or APP_ENV=development)")
 
 
 @lru_cache

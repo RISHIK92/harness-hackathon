@@ -22,6 +22,18 @@ def _redact(url: str) -> str:
     return _CREDENTIAL_IN_URL_RE.sub("https://", url)
 
 
+def _github_auth_env(token: str) -> dict[str, str]:
+    import base64
+
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
 def clone_github_repo(url: str, repo_id: str, token: Optional[str] = None) -> str:
     """Clone a GitHub repo (public or private) to local storage. Returns local path."""
     storage = Path(settings.repos_storage_path)
@@ -31,13 +43,14 @@ def clone_github_repo(url: str, repo_id: str, token: Optional[str] = None) -> st
     if dest.exists():
         shutil.rmtree(dest)
 
-    if token:
-        # Inject token into URL for private repos
-        if url.startswith("https://"):
-            url = url.replace("https://", f"https://{token}@")
+    # The token travels as an HTTP header set through git's environment
+    # config — never in the URL, where it was written into the clone's
+    # .git/config (readable by anything that later runs in that checkout)
+    # and sent to whatever host the URL named. Scoped to github.com.
+    env = _github_auth_env(token) if token and url.startswith("https://github.com/") else None
 
     log.info("cloning_repo", url=_redact(url), dest=str(dest))
-    git.Repo.clone_from(url, str(dest), depth=1)
+    git.Repo.clone_from(url, str(dest), env=env, depth=1)
     log.info("clone_complete", dest=str(dest))
     return str(dest)
 

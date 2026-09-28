@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import shlex
 from pathlib import Path
 
 from ..verify.runner import run
@@ -36,7 +37,11 @@ def syntax_check(repo: Path, path: str, toolchain=None) -> None:
         ".json": None,
     }.get(suffix)
     if checker:
-        r = run(f"{checker} {target}", repo, timeout=30, check_deny=False)
+        # The checker is ours; the file name is the model's (it can create
+        # files), so it is quoted and the deny list, which reads commands,
+        # has nothing to add.
+        r = run(f"{checker} {shlex.quote(str(target))}", repo, timeout=30,
+                check_deny=False)
         if not r.ok:
             raise EditFailure("syntax", r.output[-400:] or "check failed",
                               path=path)

@@ -336,7 +336,16 @@ def _format_schemas(allowed: set[str] | None = None) -> str:
     return "\n".join(lines)
 
 
-def _format_accounts() -> str:
+_ACCOUNT_TOOLS = {"get_account", "get_account_logs", "search_tickets", "get_incidents"}
+
+
+def _format_accounts(allowed_tools: set[str] | None) -> str:
+    """The fictional Meridian accounts, only when this turn may actually use
+    the demo account tools. They used to be injected into EVERY plan prompt,
+    so real workspaces were told about customers that do not exist — and the
+    planner kept inventing get_account calls for them."""
+    if allowed_tools is not None and not (allowed_tools & _ACCOUNT_TOOLS):
+        return "(none for this workspace)"
     return "\n".join(f"- {a['id']}: {a['name']} (tier={a['tier']}, city={a['home_city']})" for a in load_accounts())
 
 
@@ -434,7 +443,7 @@ def build_plan_prompt(
     return _PLAN_PROMPT.format(
         system_rules=system_rules(org_name, agent_name),
         tool_schemas=_format_schemas(allowed_tools),
-        known_accounts=_format_accounts(),
+        known_accounts=_format_accounts(allowed_tools),
         context_block=context_block,
         question=question,
         screen_context_block=screen_block,

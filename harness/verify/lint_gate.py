@@ -10,9 +10,11 @@ without running a single test.  Two rules prevent that:
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..repo.paths import norm
 from .runner import run
 
 # A linter that is configured but not installed must DEGRADE, never pass
@@ -70,7 +72,7 @@ class LintResult:
 def parse_diagnostics(text: str) -> set:
     out = set()
     for m in DIAG.finditer(ANSI.sub("", text or "")):
-        path = m.group("file").lstrip("./").strip()
+        path = norm(m.group("file"))
         if not path or " " in path or not _looks_like_path(path):
             continue
         code = m.group("rest").strip().split(" ")[0].rstrip(":") or "?"
@@ -86,6 +88,7 @@ def capture_baseline(repo: Path, toolchain, log) -> set:
     """Whole-repo diagnostics BEFORE any edit. Reference, not a gate."""
     if not toolchain or not toolchain.lint_cmd:
         return set()
+    # The repository's (or the operator's) own lint command, unmodified.
     r = run(concise(toolchain.lint_cmd), repo, timeout=120,
             check_deny=False)
     if NOT_INSTALLED.search(r.output):
@@ -109,7 +112,10 @@ def gate(repo: Path, toolchain, changed: list, baseline_lint: set,
     if not lintable:
         return LintResult(ran=False, reason="no lintable files changed")
 
-    targets = " ".join(f'"{p}"' for p in lintable)
+    # The linter is the repository's; the paths are files the model changed
+    # or created. Double quotes still expand `$(...)`, so each path is
+    # shell-quoted instead.
+    targets = " ".join(shlex.quote(p) for p in lintable)
     r = run(f"{concise(toolchain.lint_cmd)} {targets}", repo, timeout=120,
             check_deny=False)
     if NOT_INSTALLED.search(r.output):

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 
+from ..repo.paths import norm
 from .formats import LINE_RANGE, SEARCH_REPLACE, WHOLE_FILE, Edit
 
 
@@ -99,7 +100,10 @@ def _parse_file_ops(body: str) -> tuple[list, str]:
 
 
 def _clean_path(raw: str, default: str) -> str:
-    p = (raw or "").strip().strip("`\"'").lstrip("./")
+    # `lstrip("./")` removed characters, not the prefix: `.github/x.yml`
+    # became `github/x.yml`. Canonicalising keeps the dot; a path that
+    # leaves the repository is refused where it is applied (apply.py).
+    p = norm((raw or "").strip().strip("`\"'"))
     return p or default
 
 

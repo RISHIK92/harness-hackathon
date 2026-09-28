@@ -3,8 +3,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
 
+from app.core.auth import get_current_user
+from app.core.repo_access import authorize_repo
+from app.core.workspace import get_current_workspace
 from app.database import get_session
-from app.models import Pin, PinCreate, PinRead
+from app.models import Pin, PinCreate, PinRead, User, Workspace
 
 router = APIRouter()
 
@@ -13,7 +16,11 @@ router = APIRouter()
 async def create_pin(
     payload: PinCreate,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+    workspace: Workspace = Depends(get_current_workspace),
 ):
+    # The router-level check has no repo to look at here — it is in the body.
+    await authorize_repo(session, payload.repo_id, current_user, workspace)
     pin = Pin(**payload.model_dump())
     session.add(pin)
     await session.commit()

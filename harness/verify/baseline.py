@@ -50,6 +50,7 @@ class Baseline:
 
 
 def _coverage_available(repo: Path, python: str) -> bool:
+    # Harness constant on the discovered interpreter; no model text.
     r = run(f"{python} -m coverage --version", repo, timeout=20,
             check_deny=False)
     return r.ok
@@ -80,6 +81,9 @@ def capture(repo: Path, toolchain, cfg, log, work_dir: Path) -> Baseline:
         cmd = _instrument(cmd, rc_path, python)
 
     log.debug(f"baseline command: {cmd}")
+    # The repository's own suite (CI, Makefile, manifest or the operator's
+    # HARNESS_TEST_CMD) with harness-built flags. No model text: the deny
+    # list would only refuse a project whose test script it dislikes.
     result = run(cmd, repo, timeout=BASELINE_CAP_S, check_deny=False,
                  env_extra={"COVERAGE_FILE": str(work_dir / ".coverage")})
     bl.duration_s = result.duration_s
@@ -135,6 +139,7 @@ def _instrument(cmd: str, rc: Path, python: str) -> str:
 
 def _read_coverage(repo: Path, rc: Path, out: Path, work_dir: Path,
                    log, python: str = "python3") -> tuple[dict, bool]:
+    # Harness-built coverage query on harness paths; no model text.
     r = run(f"{python} -m coverage json --rcfile={rc} --show-contexts -o {out}",
             repo, timeout=60, check_deny=False,
             env_extra={"COVERAGE_FILE": str(work_dir / ".coverage")})

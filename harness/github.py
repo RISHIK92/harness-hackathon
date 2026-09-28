@@ -14,9 +14,11 @@ Accepted references:
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -250,12 +252,19 @@ def clone(fetched: Fetched, workspace: Path, log=None,
             return target
         shutil.rmtree(target, ignore_errors=True)
 
-    url = _authed_url(fetched.clone_url)
-    flags = f"--depth {depth}" if depth else ""
+    # The token rides in the environment of the two commands that need it,
+    # never in the URL: a URL with a token in it is written into
+    # .git/config by `clone`, where every later process -- the repository's
+    # own tests among them -- can read it, and argv is readable by every
+    # process on the machine. Harness-built commands with a quoted URL and
+    # path, so the deny list has nothing to check.
+    auth = clone_auth_env(fetched.clone_url)
+    flags = f"--depth {depth} " if depth else ""
     if log:
         log.line(f"cloning {fetched.ref.slug} -> {target}", phase="P0")
-    result = run(f"git clone --quiet {flags} {url} {target}", workspace,
-                 timeout=600, check_deny=False)
+    result = run(f"git clone --quiet {flags}"
+                 f"{shlex.quote(fetched.clone_url)} {shlex.quote(str(target))}",
+                 workspace, timeout=600, check_deny=False, env_extra=auth)
     if not result.ok:
         raise GitHubError(f"clone failed: {result.output[-300:]}")
 
@@ -263,7 +272,9 @@ def clone(fetched: Fetched, workspace: Path, log=None,
         branch = f"pr-{fetched.ref.number}"
         fetch_cmd = (f"git fetch --quiet origin "
                      f"pull/{fetched.ref.number}/head:{branch}")
-        if run(fetch_cmd, target, timeout=300, check_deny=False).ok:
+        if run(fetch_cmd, target, timeout=300, check_deny=False,
+               env_extra=auth).ok:
+            # Harness-built branch name from a numeric PR id.
             run(f"git checkout --quiet {branch}", target, timeout=60,
                 check_deny=False)
             if log:
@@ -273,6 +284,7 @@ def clone(fetched: Fetched, workspace: Path, log=None,
                      f"staying on {fetched.default_branch}")
     else:
         branch = f"harness/issue-{fetched.ref.number}"
+        # Harness-built branch name from a numeric issue id.
         run(f"git checkout --quiet -b {branch}", target, timeout=60,
             check_deny=False)
         if log:
@@ -280,12 +292,29 @@ def clone(fetched: Fetched, workspace: Path, log=None,
     return target
 
 
-def _authed_url(url: str) -> str:
-    """Embed a token for private repositories, without logging it."""
+def auth_env(token: str | None) -> dict:
+    """A token for one git command, carried in the environment.
+
+    Never in the URL and never in argv: a URL with a token in it is written
+    into .git/config by `clone`, and argv is readable by every process on the
+    machine.
+    """
+    if not token:
+        return {}
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return {"GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+            "GIT_TERMINAL_PROMPT": "0"}
+
+
+def clone_auth_env(url: str) -> dict:
+    """GITHUB_TOKEN for a git command against `url` -- only github.com over
+    https, the one host the token is for."""
     token = _token()
-    if token and url.startswith("https://github.com/"):
-        return url.replace("https://", f"https://x-access-token:{token}@", 1)
-    return url
+    if token and (url or "").startswith("https://github.com/"):
+        return auth_env(token)
+    return {}
 
 
 def prepare(issue_text: str, cfg, log, confirm=None

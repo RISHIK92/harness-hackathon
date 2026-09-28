@@ -17,6 +17,15 @@ HEAD_CAP = 200_000
 TAIL_CAP = 50_000
 
 # Hard refusals. Checked against the rendered command string.
+#
+# The list is for command text the MODEL chose, and `check_deny=True` (the
+# default) is how a caller says "some of this came from a model". Every
+# call site that passes `check_deny=False` says why beside it: the command
+# is one the harness assembled from its own constants, from the operator's
+# configuration, or from the repository's declared toolchain, and any
+# model-supplied fragment inside it is a single `shlex.quote`d argument --
+# which the shell cannot read as a command, and which the list would
+# misread (a grep for the word "sudo" is not sudo).
 DENY = [
     (re.compile(r"\brm\s+-rf\s+/(?:\s|$)"), "rm -rf /"),
     (re.compile(r"\bsudo\b"), "sudo"),
@@ -79,12 +88,40 @@ def active_container():
     return _CONTAINER
 
 
+# What a repository's own code must never see. Every command below runs the
+# repository's tests, installs or a model-written reproduction, which is
+# somebody else's code; the scrubber is the only thing between it and the
+# operator's credentials.
+#
+# A substring list of five words let SSH_AUTH_SOCK (the operator's SSH
+# agent: push to anything they can), AWS_ACCESS_KEY_ID, KUBECONFIG,
+# DATABASE_URL and GOOGLE_APPLICATION_CREDENTIALS straight through. So:
+# names that are credentials whatever they look like, whole families that
+# are nothing but credentials, the shapes secrets are spelled in, and any
+# value that is a URL carrying a password. PATH, HOME, LANG, TMPDIR and the
+# rest of what a toolchain needs are none of these, and stay.
+_SECRET_NAMES = {"SSH_AUTH_SOCK", "KUBECONFIG", "DATABASE_URL", "NETRC",
+                 "GIT_ASKPASS", "SSH_ASKPASS", "SUDO_ASKPASS", "PGPASSFILE",
+                 "GOOGLE_APPLICATION_CREDENTIALS"}
+_SECRET_PREFIXES = ("AWS_", "AZURE_", "HARNESS_")
+_SECRET_SHAPE = re.compile(
+    r"SECRET|PASSW(?:OR)?D|TOKEN|CREDENTIAL|API_?KEY|PRIVATE_?KEY|"
+    r"ACCESS_?KEY|(?:^|_)AUTH(?:$|_)|_KEY$|_DSN$")
+_URL_WITH_PASSWORD = re.compile(r"://[^/\s:@]*:[^/\s@]+@")
+
+
+def is_secret(name: str, value: str = "") -> bool:
+    """True when `name=value` is a credential the repository must not see."""
+    upper = name.upper()
+    return (upper in _SECRET_NAMES
+            or upper.startswith(_SECRET_PREFIXES)
+            or bool(_SECRET_SHAPE.search(upper))
+            or bool(_URL_WITH_PASSWORD.search(value or "")))
+
+
 def _clean_env(repo_path) -> dict:
     """A scrubbed copy of the environment. The API key never crosses this line."""
-    env = {k: v for k, v in os.environ.items()
-           if not any(tok in k.upper()
-                      for tok in ("API_KEY", "TOKEN", "SECRET", "PASSWORD",
-                                  "CREDENTIAL", "HARNESS_"))}
+    env = {k: v for k, v in os.environ.items() if not is_secret(k, v)}
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
     env["PYTHONHASHSEED"] = "0"
     env["PYTHONDONTWRITEBYTECODE"] = "1"

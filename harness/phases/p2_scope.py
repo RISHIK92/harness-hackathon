@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ..context.assemble import system_prompt, wrap_untrusted
 from ..records import ChangePlan, FileIntent, RecordError
+from ..repo.paths import norm
 from ..repo.search import is_source
 from ..repo.snippets import symbols
 from ..structured import ParseFailure, ask_structured
@@ -121,13 +122,15 @@ def _plan_from(data: dict, root_cause, suspects: list[str]) -> ChangePlan:
     for raw in (data.get("files_to_change") or [])[:8]:
         if isinstance(raw, dict) and raw.get("path"):
             plan.files_to_change.append(FileIntent(
-                str(raw["path"]).lstrip("./"),
+                norm(raw["path"]),
                 (str(raw["symbol"]) if raw.get("symbol") else None),
                 str(raw.get("intent", ""))[:200],
                 is_new=bool(raw.get("new_file"))))
         elif isinstance(raw, str):
-            plan.files_to_change.append(FileIntent(raw.lstrip("./")))
-    plan.files_must_not_change = [str(p).lstrip("./") for p in
+            plan.files_to_change.append(FileIntent(norm(raw)))
+    # Canonical, not `lstrip("./")`: that strips characters, so a must-not
+    # of `.env` became `env` and protected nothing.
+    plan.files_must_not_change = [norm(p) for p in
                                   (data.get("files_must_not_change") or [])[:20]]
     if not plan.files_to_change:
         plan.files_to_change = [FileIntent(p) for p in suspects[:1]]

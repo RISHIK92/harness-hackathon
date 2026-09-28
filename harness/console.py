@@ -649,6 +649,7 @@ class Console:
         from .verify.runner import run
 
         def git(args):
+            # Constant read-only git queries; no model text (deny list off).
             return run(f"git {args}", cfg.repo_path, timeout=30,
                        check_deny=False).stdout
 

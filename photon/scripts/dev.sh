@@ -239,8 +239,13 @@ start_harness() {
   [ -x "$py" ] || py=python3
   local key="${AI_API_KEY:-$(env_value AI_API_KEY)}"
   [ -n "$key" ] || warn "AI_API_KEY is not set (env or server/.env) — every run will exit CONFIG_ERROR"
+  # HARNESS_SERVICE_ALLOW_LOCAL: the Mock button's repo is a local path, and
+  # the service refuses anything but https URLs unless told otherwise. Only
+  # here, for local development: the service binds to loopback when it has
+  # no token, and --with-ngrok exposes :8000, never :8765.
   ( cd "$HARNESS_ROOT" && AI_API_KEY="$key" \
       HARNESS_SERVICE_TOKEN="${HARNESS_SERVICE_TOKEN:-$(env_value HARNESS_SERVICE_TOKEN)}" \
+      HARNESS_SERVICE_ALLOW_LOCAL=1 \
       nohup "$py" -m harness.service > "$LOGS/harness.log" 2>&1 & )
   wait_for "healthy" 20 curl -sf -o /dev/null --max-time 5 http://127.0.0.1:8765/v1/health \
     || warn "see $LOGS/harness.log"

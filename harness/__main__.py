@@ -17,8 +17,18 @@ def _secrets() -> list:
 
 
 def _resolve_github(cfg, log, gate=None) -> bool:
-    """Returns False when the clone was declined."""
+    """Returns False when the clone was declined.
+
+    Never in a service run: the service names the repository explicitly and
+    has already cloned it. The first word of a ticket is the ticket author's
+    text, and reading `other/repo#1` there as an instruction let whoever
+    wrote the ticket point the run -- and its fix -- at another repository.
+    """
     from . import consent, github
+    from .config import service_run
+
+    if service_run():
+        return True
 
     confirm = None
     if gate is not None:
@@ -44,37 +54,53 @@ def _resolve_github(cfg, log, gate=None) -> bool:
 def _publishable(cfg, exit_code: int) -> str:
     """"" when the run may be proposed to a human, else why not.
 
-    The exit code alone is not evidence. A PARTIAL run can have a failed
-    HARD gate -- a broken test, a file changed outside the plan -- and one
-    was opened as a pull request that turned `return 0` into
-    `return "No data"` and broke the suite. Proposing a change that fails
-    its own verification is the single thing this harness exists to prevent.
+    The rule itself is `exits.publish_refusal`, shared with the service's
+    /publish so the two can never disagree about what is good enough.
     """
-    if exit_code == exits.SUCCESS:
+    return exits.publish_refusal(exit_code, getattr(cfg, "_confidence", None),
+                                 getattr(cfg, "_verify", None))
+
+
+def _dirty_refusal(cfg) -> str:
+    """"" when a run may start in `cfg.repo_path`, else why not.
+
+    A run resets the working tree between attempts (`checkout -- .` and
+    `clean`), which is right for a tree only the harness has touched and
+    destroys an operator's uncommitted work in any other. So it does not
+    start on one, unless told to with HARNESS_ALLOW_DIRTY=1.
+
+    Not asked of a tree the harness made itself -- the clone of a GitHub
+    reference, a service checkout -- nor of a dry run, which never resets.
+    """
+    from .config import env_bool, service_run
+    if cfg.dry_run or cfg.github is not None or service_run() \
+            or env_bool("HARNESS_ALLOW_DIRTY"):
         return ""
-    if exit_code != exits.PARTIAL:
-        return f"the run did not produce a fix (exit {exit_code})"
-
-    conf = getattr(cfg, "_confidence", None)
-    if conf is None:
-        return "no confidence report to judge the change by"
-    failed = [c for c in conf.HARD if not getattr(conf, c, False)]
-    if failed:
-        return "a hard gate failed: " + ", ".join(failed)
-
-    verify = getattr(cfg, "_verify", None)
-    for cls in (getattr(verify, "full", None), getattr(verify, "scoped", None)):
-        if cls is not None and getattr(cls, "new", None):
-            return (f"the change introduces {len(cls.new)} new test "
-                    f"failure(s): {', '.join(cls.new[:3])}")
-    if getattr(verify, "oracle_passes", None) is False:
-        return "the reproduction test still fails"
-    return ""
+    from .repo.workspace import Workspace
+    changed = Workspace(cfg.repo_path).uncommitted()
+    if not changed:
+        return ""
+    shown = ", ".join(changed[:5])
+    if len(changed) > 5:
+        shown += f" and {len(changed) - 5} more"
+    return (f"{cfg.repo_path} has uncommitted changes ({shown}). A run "
+            f"resets the working tree between attempts, which would destroy "
+            f"them. Commit or stash them first, or set HARNESS_ALLOW_DIRTY=1 "
+            f"to run anyway.")
 
 
 def _maybe_pr(cfg, log, gate, exit_code: int) -> None:
-    """Unattended runs open a pull request only when explicitly allowed."""
+    """Unattended runs open a pull request only when explicitly allowed.
+
+    Never in a service run. Publishing there is the service's /publish, with
+    the caller's token; this path still COMMITTED locally before its push
+    gate refused, which left /publish nothing to commit, so every successful
+    run failed to publish.
+    """
     from . import pullrequest as PR
+    from .config import service_run
+    if service_run():
+        return
     refusal = _publishable(cfg, exit_code)
     if refusal:
         log.note("no_pr", f"not opening a pull request: {refusal}")
@@ -130,6 +156,10 @@ def _interactive(cfg, log) -> int:
                     continue
             except github.GitHubError as exc:
                 log.warn(f"github: {exc}")
+                continue
+            refusal = _dirty_refusal(cfg)
+            if refusal:
+                log.warn(refusal)
                 continue
 
             started = time.time()
@@ -194,6 +224,10 @@ def main(argv: list[str] | None = None) -> int:
 
         if not _resolve_github(cfg, log, gate):
             log.raw("the clone was not permitted; nothing to do")
+            return exits.CONFIG_ERROR
+        refusal = _dirty_refusal(cfg)
+        if refusal:
+            log.raw(f"config error: {refusal}")
             return exits.CONFIG_ERROR
         code = _run_once(cfg, log, gate)
         _maybe_pr(cfg, log, gate, code)

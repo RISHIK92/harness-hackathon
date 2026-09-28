@@ -61,12 +61,12 @@ async def search_slack(
 ) -> dict:
     """Search Slack history.
 
-    Prefers the workspace's REAL connected Slack when it has any indexed,
-    and falls back to the seed corpus otherwise. Two reasons for the
-    fallback rather than an empty result: the demo scenarios must keep
-    working on a deployment with no Slack connected, and a workspace that
-    has just connected Slack but not finished its first sync should degrade
-    to "nothing found" behaviour rather than an error.
+    A workspace searches only its REAL connected Slack. With nothing indexed
+    yet it gets "nothing found" — never the seed corpus. It used to fall back
+    to the fictional Meridian Slack, so a workspace that had just connected
+    Slack (or whose search errored) was answered from made-up messages cited
+    as real ones. The seed corpus is reachable only with no workspace at all,
+    which is the eval harness (evals/agent_eval.py), never an API request.
 
     The workspace filter is applied inside the vector query (Qdrant payload
     filter), never after: filtering post-hoc would let one tenant's messages
@@ -77,18 +77,20 @@ async def search_slack(
         try:
             from app.services import slack_sync
 
-            if await asyncio.get_event_loop().run_in_executor(None, slack_sync.has_data, workspace_id):
-                hits = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: slack_sync.search(workspace_id, query, channel, top_k)
-                )
-                evidence = [_real_slack_to_evidence(h) for h in hits]
-                return tool_result(
-                    "search_slack",
-                    evidence,
-                    note=None if evidence else f"no Slack messages matched '{query}'",
-                )
-        except Exception as exc:  # noqa: BLE001 - fall back rather than fail the turn
+            if not await asyncio.get_event_loop().run_in_executor(None, slack_sync.has_data, workspace_id):
+                return tool_result("search_slack", [], note="no Slack messages are indexed for this workspace yet")
+            hits = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: slack_sync.search(workspace_id, query, channel, top_k)
+            )
+        except Exception as exc:  # noqa: BLE001
             log.error("tool.search_slack_workspace_error", error=str(exc))
+            return tool_error("search_slack", f"search_slack failed: {exc}")
+        evidence = [_real_slack_to_evidence(h) for h in hits]
+        return tool_result(
+            "search_slack",
+            evidence,
+            note=None if evidence else f"no Slack messages matched '{query}'",
+        )
 
     query_filter = None
     if channel:

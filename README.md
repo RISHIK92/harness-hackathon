@@ -206,7 +206,10 @@ through `pull/456/head`, so a fork works the same as a branch.
 No `gh` needed -- the GitHub REST API is reached with the standard library,
 the same way the model providers are. `gh` is used when it is already
 installed, because it already holds your auth. For private repositories or
-to lift the 60-request hourly rate limit, set `GITHUB_TOKEN`.
+to lift the 60-request hourly rate limit, set `GITHUB_TOKEN`. The token goes
+to git as an HTTP header in the environment of the clone and the push, never
+in the clone URL -- a URL is written into `.git/config`, where the
+repository's own tests could read it.
 
 Reporting back is off by default, because it writes to someone else's issue
 tracker:
@@ -325,7 +328,15 @@ Key properties:
 
 - **No code before the root cause.** Phase 1 is handed no write tool at all.
 - **The harness decides what is true.** Every hypothesis carries a check the
-  harness runs itself; the model proposes and interprets.
+  harness runs itself; the model proposes and interprets. A check reads only
+  inside the repository, and a `test` check names a test file or test id
+  that the harness runs with the repository's own test command -- nothing
+  the model writes is ever handed to a shell as a command.
+- **It will not start on your uncommitted work.** A run resets the working
+  tree between attempts, so on a repository with modified, staged or
+  untracked (not ignored) files it stops with a configuration error. Commit
+  or stash first, or set `HARNESS_ALLOW_DIRTY=1`. Clones the harness made
+  itself, dry runs and service runs are not asked.
 - **Pre-existing failures are documented, never fixed.** The suite is run
   before the first edit so a regression can be told from existing debt.
 - **The lint gate is scoped to changed files** and diffed against the
@@ -476,7 +487,8 @@ Only `AI_API_KEY` is required. Everything else has a sensible default.
 | `HARNESS_MAX_CYCLES` | 5 | fix-and-verify cycle cap |
 | `HARNESS_TOKEN_BUDGET` | 900000 | global token cap |
 | `HARNESS_TIME_BUDGET` | 1500 | seconds |
-| `HARNESS_TEST_CMD` / `HARNESS_LINT_CMD` | discovered | override discovery |
+| `HARNESS_TEST_CMD` / `HARNESS_LINT_CMD` | discovered | override discovery (the operator's only: the service does not accept them from callers) |
+| `HARNESS_ALLOW_DIRTY` | 0 | start even though the repository has uncommitted changes, which a run will reset |
 | `HARNESS_DRY_RUN` | 0 | run P0–P2 and print the plan, writing nothing |
 | `HARNESS_NO_CACHE` | 0 | disable the model-call cache |
 | `HARNESS_LOG_LEVEL` | info | `info` or `debug` |
@@ -519,9 +531,42 @@ this.
 
 `AI_API_KEY` is read from the environment, injected only at the HTTP
 boundary, and never placed in a prompt or in the environment of any command
-run against the repository. Anything token-shaped is redacted before it is
-written to disk. No credential appears anywhere in this repository; a
-`.env.example` with an empty value is provided for local use.
+run against the repository. Nor is any other credential the operator's
+environment holds: every command that runs the repository's code -- its
+tests, its installs, a reproduction test -- gets an environment with the SSH
+agent, cloud keys (`AWS_*`, `AZURE_*`, `GOOGLE_APPLICATION_CREDENTIALS`),
+`KUBECONFIG`, `DATABASE_URL`, `*_DSN`, anything spelled like a token, key,
+secret or password, and any URL carrying a password removed. Anything
+token-shaped is redacted before it is written to disk. No credential appears
+anywhere in this repository; a `.env.example` with an empty value is provided
+for local use.
+
+### As a service
+
+`python -m harness.service` puts plan / fix / publish behind HTTP for
+another program (Photon uses it). Each run is the unchanged CLI, marked
+`HARNESS_SERVICE_RUN=1`, which changes three things: the repository is only
+the one the caller named -- the ticket text is never read as a GitHub
+reference -- and the run itself never commits, pushes, opens a pull request
+or comments.
+
+- **Repositories are https URLs.** A caller cannot name a local path, a
+  `file://` URL or any other transport, and cannot put a credential in the
+  URL; the caller's token travels as a header. `HARNESS_SERVICE_ALLOW_LOCAL=1`
+  lifts this for local development only.
+- **Callers cannot set commands.** `HARNESS_TEST_CMD` and `HARNESS_LINT_CMD`
+  are not among the settings a caller may override.
+- **The scope check sees new files.** It judges the same patch that would be
+  published, taken against the commit the checkout started from, untracked
+  files included.
+- **Publishing has the CLI's bar.** A PARTIAL run with a failed hard gate, a
+  new test failure or a still-red reproduction is refused, exactly as the
+  CLI refuses to open its pull request.
+- **Publishing never runs the repository's code with the token.** The run's
+  checkout is only read, without the token and with hooks off, into a patch;
+  the commit and the push happen in a fresh clone with hooks disabled and a
+  minimal environment. The patch's SHA-256 is returned, and a checkout that
+  no longer produces the patch the scope check approved is refused.
 
 ---
 

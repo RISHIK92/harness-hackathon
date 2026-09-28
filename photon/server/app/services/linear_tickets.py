@@ -66,5 +66,17 @@ def labels_of(issue: dict) -> list[str]:
     return [l.get("name", "") for l in (issue.get("labels") or {}).get("nodes", [])]
 
 
+_SIGNATURE = "_Photon — agent for "
+
+
 def signed(owner_name: str, body: str) -> str:
-    return f"_Photon — agent for {owner_name}_\n\n{body}"
+    return f"{_SIGNATURE}{owner_name}_\n\n{body}"
+
+
+def is_photon_comment(body: str) -> bool:
+    """Photon posts with the member's own key, so Linear shows the member as
+    the author — the signature line is the only way to tell. Such a comment
+    must never be read as the member deciding: plan comments carry model
+    output shaped by the ticket text, and a line in it reading "/approve"
+    used to approve the plan on the member's behalf."""
+    return (body or "").lstrip().startswith(_SIGNATURE)

@@ -111,6 +111,7 @@ def command_for(repo: Path, language: str, path: Path) -> str:
 
 
 def _can_import(repo: Path, interp: str, module: str) -> bool:
+    # Harness constant on the discovered interpreter; no model text.
     r = run(f"{interp} -c \"import {module}\"", repo, timeout=20,
             check_deny=False)
     return r.exit_code == 0
@@ -252,6 +253,10 @@ def attempt(ctx, issue: str, root_cause, context: str) -> Repro:
         rep.source = source
         rep.path = install(ctx.repo, language, source)
 
+        # `cmd` is `command_for`'s: a runner and the fixed file name. The
+        # model wrote the file's CONTENTS, which run as code -- that is what
+        # a test is, and only a sandbox bounds it; the deny list reads
+        # command text, and there is none of the model's in this one.
         result = run(cmd, ctx.repo, timeout=TIMEOUT, check_deny=False)
 
         if _looks_empty(result):
@@ -289,6 +294,7 @@ def confirm(ctx, rep: Repro) -> Repro:
     """Run a validated reproduction against the fixed code."""
     if not rep.is_oracle or not rep.cmd:
         return rep
+    # The same harness-built command as in `attempt`.
     result = run(rep.cmd, ctx.repo, timeout=TIMEOUT, check_deny=False)
     if _looks_empty(result):
         rep.status = STILL_FAILING

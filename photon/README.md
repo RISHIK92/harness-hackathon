@@ -118,7 +118,10 @@ python3 worker.py dev
 
 | Variable | Purpose |
 |---|---|
-| `SECRET_KEY` | JWT signing + Fernet key for encrypted connector credentials |
+| `APP_ENV` | `development` or `production` (the default). Outside development the API refuses to start with an empty or published `SECRET_KEY`, and `/dev/*` routes are never mounted |
+| `SECRET_KEY` | ≥16 random characters: the session-signing key is derived from it, and it encrypts connector credentials (Fernet) |
+| `CORS_ORIGINS` | Browser origins allowed to call the API (comma-separated); defaults to `CLIENT_BASE_URL` |
+| `WORKER_SERVICE_TOKEN` | Optional. The call-agent's credential for the API; derived from `LIVEKIT_API_SECRET` when unset |
 | `POSTGRES_*` / `REDIS_URL` / `QDRANT_HOST` / `QDRANT_PORT` | Data store connections |
 | `GEMINI_API_KEY`, `VOYAGE_API_KEY` | Embeddings |
 | `OPENROUTER_API_KEY` | All text/vision LLM calls (plan, compose, vision) — see note below |
@@ -189,9 +192,18 @@ per-source at any time.
 
 ## Scope notes
 
-- `POST /api/agent/ask(/stream)` is unauthenticated by design (documented
-  demo-scope decision) — `workspace_id` on that route is client-asserted,
-  the same trust boundary as the rest of that endpoint today.
+- **Every API route is authenticated** except a reviewed allow-list (sign-in,
+  guest knock/admission, signed webhooks, extension pairing, health) —
+  `server/tests/test_security_floor.py` fails on any new route that is
+  neither. `POST /api/agent/ask(/stream)` takes a signed-in member (the
+  workspace is resolved from their membership, never trusted from the body)
+  or the call-agent worker.
+- **The worker authenticates per meeting.** Its token is
+  `HMAC(key, "meeting:<slug>")`, with the key from `WORKER_SERVICE_TOKEN` or
+  derived from `LIVEKIT_API_SECRET` — so a token captured on one call opens
+  no other, and no new configuration is needed. See `server/app/core/service_auth.py`.
+- **Trace events reach members only.** They carry the evidence behind an
+  answer, so guests on a call hear the answer and never receive the data.
 - The seed `Meridian` corpus (`server/app/seed/`) is a fictional company
   used only by the eval harness and gated behind `enable_demo_corpus`
   (off by default) — it never appears in a real workspace.
